@@ -1,51 +1,87 @@
-#include <QTcpSocket>
 #include <QCoreApplication>
+#include <QTcpSocket>
 #include <QDebug>
-#include <QTimer>
+#include "wintunadapter.h"
 
 class VpnClient : public QObject {
     Q_OBJECT
 public:
     VpnClient(QObject *parent = nullptr) : QObject(parent) {
         socket = new QTcpSocket(this);
-        // Обработка успешного подключения
+        tunAdapter = new WintunAdapter(this);
+
+        // Подключаем сигналы Wintun адаптера
+        connect(tunAdapter, &WintunAdapter::packetReceived,
+                this, &VpnClient::onTunPacketReceived);
+        connect(tunAdapter, &WintunAdapter::errorOccurred,
+                this, &VpnClient::onTunError);
+        connect(tunAdapter, &WintunAdapter::adapterReady,
+                this, &VpnClient::onTunReady);
+
+        // Подключаем сигналы TCP сокета
         connect(socket, &QTcpSocket::connected, this, &VpnClient::onConnected);
-        // Обработка получения данных от сервера
-        connect(socket, &QTcpSocket::readyRead, this, &VpnClient::onReadyRead);
-        // Обработка ошибок
-        connect(socket, &QTcpSocket::errorOccurred, this, &VpnClient::onError);
+        connect(socket, &QTcpSocket::readyRead, this, &VpnClient::onSocketReadyRead);
     }
 
-    void connectToServer(const QString &address, quint16 port) {
-        qDebug() << "Connecting to" << address << ":" << port;
-        socket->connectToHost(address, port);
+    void start(const QString &serverAddress, quint16 port) {
+        // Инициализируем и запускаем TUN адаптер
+        if (!tunAdapter->initialize("MyVPN")) {
+            qDebug() << "Failed to initialize TUN adapter";
+            return;
+        }
+
+        if (!tunAdapter->start()) {
+            qDebug() << "Failed to start TUN adapter";
+            return;
+        }
+
+        // Подключаемся к VPN серверу
+        qDebug() << "Connecting to VPN server at" << serverAddress << ":" << port;
+        socket->connectToHost(serverAddress, port);
     }
 
 private slots:
+    void onTunReady() {
+        qDebug() << "✅ TUN adapter is ready!";
+        qDebug() << "   Adapter name:" << tunAdapter->getAdapterName();
+        qDebug() << "   Now you can configure routing to send traffic through this adapter";
+    }
+
+    void onTunPacketReceived(const QByteArray &packet) {
+        qDebug() << "📥 Packet from TUN (size:" << packet.size() << "bytes)";
+        // TODO: Зашифровать и отправить на сервер
+        socket->write(packet);
+    }
+
+    void onTunError(const QString &error) {
+        qDebug() << "❌ TUN Adapter error:" << error;
+    }
+
     void onConnected() {
-        qDebug() << "Connected to server!";
-        // Отправляем тестовое сообщение
-        socket->write("Hello, VPN Server!");
+        qDebug() << "✅ Connected to VPN server";
     }
 
-    void onReadyRead() {
+    void onSocketReadyRead() {
         QByteArray data = socket->readAll();
-        qDebug() << "Server response:" << data;
-        QCoreApplication::quit(); // Завершаем после ответа
-    }
-
-    void onError(QAbstractSocket::SocketError) {
-        qDebug() << "Socket error:" << socket->errorString();
+        qDebug() << "📥 Received from server (size:" << data.size() << "bytes)";
+        // TODO: Расшифровать и отправить в TUN адаптер
+        tunAdapter->sendPacket(data);
     }
 
 private:
     QTcpSocket *socket;
+    WintunAdapter *tunAdapter;
 };
 
 int main(int argc, char *argv[]) {
     QCoreApplication a(argc, argv);
+
+    qDebug() << "🛡️ VPN Client with Wintun";
+    qDebug() << "=========================";
+
     VpnClient client;
-    client.connectToServer("127.0.0.1", 8080);
+    client.start("127.0.0.1", 8080);
+
     return a.exec();
 }
 
