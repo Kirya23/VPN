@@ -1,7 +1,36 @@
 #include <QCoreApplication>
 #include <QTcpSocket>
 #include <QDebug>
+#include <QTimer>
+#include <QThread>
+#include <QCryptographicHash>
 #include "wintunadapter.h"
+
+// Эмуляция TUN адаптера (пока просто генерируем тестовые пакеты)
+class SimpleTunEmulator : public QObject {
+    Q_OBJECT
+public:
+    SimpleTunEmulator(WintunAdapter* adapter, QObject *parent = nullptr)
+        : QObject(parent), tunAdapter(adapter) {
+
+        // Подключаем сигнал получения пакетов от TUN адаптера
+        connect(tunAdapter, &WintunAdapter::packetReceived,
+                this, &SimpleTunEmulator::onPacketReceived);
+    }
+
+private slots:
+    void onPacketReceived(const QByteArray &packet) {
+        qDebug() << "📥 Packet from TUN (size:" << packet.size() << "bytes)";
+        // Отправляем сигнал с пакетом
+        emit packetReady(packet);
+    }
+
+signals:
+    void packetReady(const QByteArray &packet);
+
+private:
+    WintunAdapter* tunAdapter;
+};
 
 class VpnClient : public QObject {
     Q_OBJECT
@@ -21,6 +50,7 @@ public:
         // Подключаем сигналы TCP сокета
         connect(socket, &QTcpSocket::connected, this, &VpnClient::onConnected);
         connect(socket, &QTcpSocket::readyRead, this, &VpnClient::onSocketReadyRead);
+        connect(socket, &QTcpSocket::errorOccurred, this, &VpnClient::onSocketError);
     }
 
     void start(const QString &serverAddress, quint16 port) {
@@ -44,13 +74,46 @@ private slots:
     void onTunReady() {
         qDebug() << "✅ TUN adapter is ready!";
         qDebug() << "   Adapter name:" << tunAdapter->getAdapterName();
-        qDebug() << "   Now you can configure routing to send traffic through this adapter";
+
+        #ifdef Q_OS_WIN
+        QThread::sleep(2); // Даём время адаптеру инициализироваться
+
+        // 1. Назначаем IP адаптеру
+        QString setIpCmd = QString("netsh interface ip set address \"%1\" static 10.0.0.2 255.255.255.0")
+                               .arg(tunAdapter->getAdapterName());
+        int result = system(setIpCmd.toLocal8Bit().data());
+        if (result == 0) {
+            qDebug() << "   ✅ IP address set to 10.0.0.2";
+        } else {
+            qDebug() << "   ❌ Failed to set IP address (run as administrator!)";
+        }
+
+        // 2. Удаляем старый маршрут для 8.8.8.8 если есть
+        system("route delete 8.8.8.8 > nul 2>&1");
+
+        // 3. Добавляем тестовый маршрут для ping
+        result = system("route add 8.8.8.8 mask 255.255.255.255 10.0.0.1 metric 1");
+        if (result == 0) {
+            qDebug() << "   ✅ Route added for 8.8.8.8 -> 10.0.0.1";
+        } else {
+            qDebug() << "   ⚠️ Failed to add route (might already exist)";
+        }
+
+        qDebug() << "   → VPN is ready! Try: ping 8.8.8.8";
+        #endif
     }
 
     void onTunPacketReceived(const QByteArray &packet) {
         qDebug() << "📥 Packet from TUN (size:" << packet.size() << "bytes)";
-        // TODO: Зашифровать и отправить на сервер
-        socket->write(packet);
+
+        // Проверяем, открыт ли сокет
+        if (socket->state() == QAbstractSocket::ConnectedState) {
+            // TODO: Зашифровать пакет
+            socket->write(packet);
+            qDebug() << "   → Forwarded to server";
+        } else {
+            qDebug() << "   ⚠️ Socket not connected, packet dropped";
+        }
     }
 
     void onTunError(const QString &error) {
@@ -58,14 +121,25 @@ private slots:
     }
 
     void onConnected() {
-        qDebug() << "✅ Connected to VPN server";
+        qDebug() << "✅ Connected to VPN server!";
+
+        // Отправляем приветствие серверу
+        socket->write("VPN_CLIENT_INIT");
     }
 
     void onSocketReadyRead() {
         QByteArray data = socket->readAll();
         qDebug() << "📥 Received from server (size:" << data.size() << "bytes)";
+
         // TODO: Расшифровать и отправить в TUN адаптер
-        tunAdapter->sendPacket(data);
+        if (tunAdapter->isRunning()) {
+            tunAdapter->sendPacket(data);
+            qDebug() << "   → Forwarded to TUN adapter";
+        }
+    }
+
+    void onSocketError(QAbstractSocket::SocketError error) {
+        qDebug() << "❌ Socket error:" << socket->errorString();
     }
 
 private:
