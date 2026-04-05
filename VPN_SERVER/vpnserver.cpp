@@ -52,6 +52,8 @@ void VpnServer::onNewConnection() {
 }
 
 void VpnServer::handlePacket(QTcpSocket* clientSocket, const QByteArray& packet) {
+    qDebug() << "📨 Processing packet of size:" << packet.size() << "bytes";
+
     if (packet.size() < 20) {
         qDebug() << "   ⚠️ Packet too small:" << packet.size();
         return;
@@ -59,6 +61,12 @@ void VpnServer::handlePacket(QTcpSocket* clientSocket, const QByteArray& packet)
 
     // Определяем версию IP
     unsigned char version = (packet[0] >> 4) & 0x0F;
+    qDebug() << "   → IP version:" << (int)version;
+
+    if (version != 4 && version != 6) {
+        qDebug() << "   ⚠️ Unknown IP version:" << version << "- ignoring";
+        return;
+    }
 
     if (version == 4) {
         // IPv4
@@ -67,6 +75,7 @@ void VpnServer::handlePacket(QTcpSocket* clientSocket, const QByteArray& packet)
         qDebug() << "   → IPv4 packet, protocol:" << (int)protocol;
 
         if (protocol == 1) { // ICMP
+            qDebug() << "   → Calling handleICMP...";
             handleICMP(clientSocket, packet);
         } else if (protocol == 6) { // TCP
             handleTCP(clientSocket, packet);
@@ -87,6 +96,8 @@ void VpnServer::handlePacket(QTcpSocket* clientSocket, const QByteArray& packet)
                 handleTCP(clientSocket, packet);
             } else if (nextHeader == 17) { // UDP
                 handleUDPv6(clientSocket, packet);
+            } else if (nextHeader == 58) { // ICMPv6
+                    handleICMPv6(clientSocket, packet);
             } else {
                 qDebug() << "   ⚠️ Unsupported IPv6 protocol:" << nextHeader;
             }
@@ -108,26 +119,80 @@ void VpnServer::handleUDPv6(QTcpSocket* clientSocket, const QByteArray& packet) 
 }
 
 void VpnServer::handleICMP(QTcpSocket* clientSocket, const QByteArray& packet) {
-    // Для ICMP (ping) отправляем эхо-ответ
-    if (packet.size() < 28) return;
+    qDebug() << "   → ICMP packet received";
 
-    quint32 destIP = extractDestIP(packet);
+    if (packet.size() < 28) {
+        qDebug() << "   ⚠️ ICMP packet too small:" << packet.size();
+        return;
+    }
+
+    // Извлекаем source и destination IP
+    quint32 sourceIP = ((quint32)(unsigned char)packet[12] << 24) |
+                       ((quint32)(unsigned char)packet[13] << 16) |
+                       ((quint32)(unsigned char)packet[14] << 8) |
+                       ((quint32)(unsigned char)packet[15]);
+
+    quint32 destIP = ((quint32)(unsigned char)packet[16] << 24) |
+                     ((quint32)(unsigned char)packet[17] << 16) |
+                     ((quint32)(unsigned char)packet[18] << 8) |
+                     ((quint32)(unsigned char)packet[19]);
+
+    QHostAddress sourceAddr(sourceIP);
     QHostAddress destAddr(destIP);
 
-    qDebug() << "   → ICMP packet to:" << destAddr.toString();
+    qDebug() << "   → ICMP from:" << sourceAddr.toString() << "to:" << destAddr.toString();
 
-    // Для теста: если пинг на 8.8.8.8, отправляем ответ
-    if (destIP == qToBigEndian<quint32>(0x08080808)) { // 8.8.8.8
-        QByteArray response = packet;
+    // Проверяем тип ICMP (байт 20 - тип, 21 - код)
+    unsigned char icmpType = packet[20];
+    qDebug() << "   → ICMP type:" << (int)icmpType;
 
-        // Меняем IP адреса местами (source <-> dest)
-        // В простом случае просто отправляем обратно
-        clientSocket->write(packet);
-        qDebug() << "      → ICMP Echo Reply sent";
-    } else {
-        // Для других адресов - просто эхо
-        clientSocket->write(packet);
+    // Обрабатываем только Echo Request (тип 8)
+    if (icmpType != 8) {
+        qDebug() << "   → Not an Echo Request, ignoring";
+        return;
     }
+
+    // Создаем ответный пакет
+    QByteArray response = packet;
+
+    // Меняем местами source и destination IP
+    // Source IP (был 12-15) становится Destination
+    response[12] = packet[16];
+    response[13] = packet[17];
+    response[14] = packet[18];
+    response[15] = packet[19];
+
+    // Destination IP (был 16-19) становится Source
+    response[16] = packet[12];
+    response[17] = packet[13];
+    response[18] = packet[14];
+    response[19] = packet[15];
+
+    // Меняем тип ICMP с 8 (Echo Request) на 0 (Echo Reply)
+    response[20] = 0; // Echo Reply
+
+    // Обнуляем checksum (поле 22-23), чтобы пересчитать
+    response[22] = 0;
+    response[23] = 0;
+
+    // Пересчитываем ICMP checksum
+    quint32 sum = 0;
+    for (int i = 20; i < response.size(); i += 2) {
+        quint16 word = (i + 1 < response.size())
+        ? ((unsigned char)response[i] << 8) | (unsigned char)response[i + 1]
+        : ((unsigned char)response[i] << 8);
+        sum += word;
+        if (sum & 0xFFFF0000) {
+            sum = (sum & 0xFFFF) + (sum >> 16);
+        }
+    }
+    sum = ~sum & 0xFFFF;
+    response[22] = (sum >> 8) & 0xFF;
+    response[23] = sum & 0xFF;
+
+    // Отправляем ответ обратно клиенту
+    clientSocket->write(response);
+    qDebug() << "   → ICMP Echo Reply sent to client (size:" << response.size() << "bytes)";
 }
 
 void VpnServer::handleTCP(QTcpSocket* clientSocket, const QByteArray& packet) {

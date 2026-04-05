@@ -4,6 +4,7 @@
 #include <QTcpServer>
 #include <QTcpSocket>
 #include <QUdpSocket>
+#include <QTimer>
 #include <QMap>
 #include <QObject>
 
@@ -41,6 +42,7 @@ private:
         QTcpSocket* clientSocket;
         QHostAddress targetAddress;
         quint16 targetPort;
+        QTimer* idleTimer;
     };
     QMap<quint64, UDPConnection> udpConnections;
 
