@@ -2,20 +2,31 @@ cmake_minimum_required(VERSION 3.19)
 project(VPN_server LANGUAGES CXX)
 
 find_package(Qt6 6.5 REQUIRED COMPONENTS Core Network)
+find_package(OpenSSL REQUIRED)
 
 qt_standard_project_setup()
 
 qt_add_executable(VPN_server
     main.cpp
-    vpnserver.h vpnserver.cpp
+    vpnserver.h
+    vpnserver.cpp
+    tunnelprotocol.h
+    tunnelprotocol.cpp
+    handshakeprotocol.h
+    handshakeprotocol.cpp
+    linuxtundevice.h
+    linuxtundevice.cpp
+    tunnelcrypto.h
+    tunnelcrypto.cpp
 )
 
-set(set(CMAKE_AUTOMOC ON))
+set(CMAKE_AUTOMOC ON)
 
 target_link_libraries(VPN_server
     PRIVATE
         Qt::Core
         Qt6::Network
+        OpenSSL::Crypto
 )
 
 include(GNUInstallDirs)

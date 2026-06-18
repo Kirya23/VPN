@@ -1,12 +1,15 @@
 #ifndef VPNSERVER_H
 #define VPNSERVER_H
 
-#include <QTcpServer>
-#include <QTcpSocket>
-#include <QUdpSocket>
-#include <QTimer>
-#include <QMap>
+#include <QHash>
+#include <QHostAddress>
 #include <QObject>
+#include <QUdpSocket>
+
+#include "handshakeprotocol.h"
+#include "linuxtundevice.h"
+#include "tunnelcrypto.h"
+#include "tunnelprotocol.h"
 
 class VpnServer : public QObject {
     Q_OBJECT
@@ -15,38 +18,35 @@ public:
     bool start(quint16 port);
 
 private slots:
-    void onNewConnection();
+    void onReadyRead();
 
 private:
-    void handlePacket(QTcpSocket* clientSocket, const QByteArray& packet);
-    void forwardToInternet(QTcpSocket* clientSocket, const QByteArray& ipPacket);
-
-    // Обработка разных протоколов
-    void handleTCP(QTcpSocket* clientSocket, const QByteArray& packet);
-    void handleUDP(QTcpSocket* clientSocket, const QByteArray& packet);
-    void handleICMP(QTcpSocket* clientSocket, const QByteArray& packet);
-
-    void handleICMPv6(QTcpSocket* clientSocket, const QByteArray& packet);
-    void handleUDPv6(QTcpSocket* clientSocket, const QByteArray& packet);
-
-    // Вспомогательные функции
-    quint32 extractDestIP(const QByteArray& packet);
-    quint16 extractDestPort(const QByteArray& packet);
-    QByteArray createIPResponse(const QByteArray& originalPacket, const QByteArray& payload);
-
-    QTcpServer *server;
-
-    // Хранилище UDP сокетов для каждого клиента
-    struct UDPConnection {
-        QUdpSocket* socket;
-        QTcpSocket* clientSocket;
-        QHostAddress targetAddress;
-        quint16 targetPort;
-        QTimer* idleTimer;
+    struct ClientSession {
+        QHostAddress address;
+        quint16 port = 0;
+        quint32 sessionId = 0;
+        TunnelSessionKeys keys;
+        bool established = false;
+        QByteArray clientPublicKey;
+        QByteArray clientRandom;
+        QByteArray serverPublicKey;
+        QByteArray serverPrivateKey;
+        QByteArray serverRandom;
+        quint64 nextServerSequence = 1;
     };
-    QMap<quint64, UDPConnection> udpConnections;
 
-    quint64 getConnectionId(const QHostAddress& addr, quint16 port);
+    QString peerKey(const QHostAddress &address, quint16 port) const;
+    bool sendFrame(const QHostAddress &address, quint16 port, const TunnelFrame &frame);
+    bool processClientHello(const QHostAddress &address, quint16 port, const TunnelFrame &frame);
+    bool processEncryptedData(const QHostAddress &address, quint16 port, const TunnelFrame &frame);
+    void onTunPacketReceived(const QByteArray &packet);
+    void onTunError(const QString &error);
+    ClientSession *findSession(const QHostAddress &address, quint16 port);
+    ClientSession *activeSession();
+
+    QUdpSocket *m_socket;
+    LinuxTunDevice *m_tunDevice;
+    QHash<QString, ClientSession> m_sessions;
 };
 
 #endif // VPNSERVER_H

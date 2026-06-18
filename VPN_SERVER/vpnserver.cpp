@@ -1,327 +1,280 @@
 #include "vpnserver.h"
+
 #include <QDebug>
-#include <QThread>
 #include <QtEndian>
 
-VpnServer::VpnServer(QObject *parent) : QObject(parent) {
-    server = new QTcpServer(this);
-    connect(server, &QTcpServer::newConnection, this, &VpnServer::onNewConnection);
+VpnServer::VpnServer(QObject *parent)
+    : QObject(parent)
+    , m_socket(new QUdpSocket(this))
+    , m_tunDevice(new LinuxTunDevice(this))
+{
+    connect(m_socket, &QUdpSocket::readyRead, this, &VpnServer::onReadyRead);
+    connect(m_tunDevice, &LinuxTunDevice::packetReceived, this, &VpnServer::onTunPacketReceived);
+    connect(m_tunDevice, &LinuxTunDevice::errorOccurred, this, &VpnServer::onTunError);
 }
 
 bool VpnServer::start(quint16 port) {
-    if (!server->listen(QHostAddress::Any, port)) {
-        qDebug() << "❌ Server error:" << server->errorString();
+    if (!m_socket->bind(QHostAddress::AnyIPv4, port)) {
+        qDebug() << "❌ Ошибка запуска UDP-сервера:" << m_socket->errorString();
         return false;
     }
-    qDebug() << "🌐 VPN Server listening on port" << port;
+    qDebug() << "🌐 VPN-сервер слушает UDP-порт" << port;
+
+    if (m_tunDevice->initialize(QStringLiteral("qvpn0"), QStringLiteral("10.10.0.1/24"))) {
+        if (!m_tunDevice->start()) {
+            qDebug() << "⚠️ Linux TUN backend не запущен, сервер пока останется только в режиме протокола";
+        }
+    } else {
+        qDebug() << "ℹ️ Linux TUN backend пока недоступен в этой сборке или окружении";
+    }
+
     return true;
 }
 
-void VpnServer::onNewConnection() {
-    QTcpSocket *clientSocket = server->nextPendingConnection();
-    qDebug() << "📡 Client connected from:" << clientSocket->peerAddress().toString();
+void VpnServer::onReadyRead() {
+    while (m_socket->hasPendingDatagrams()) {
+        QByteArray datagram;
+        datagram.resize(static_cast<int>(m_socket->pendingDatagramSize()));
 
-    // Отправляем приветствие
-    clientSocket->write("VPN_SERVER_READY");
-
-    connect(clientSocket, &QTcpSocket::readyRead, this, [this, clientSocket]() {
-        QByteArray data = clientSocket->readAll();
-
-        // Проверяем, не приветствие ли это
-        if (data == "VPN_CLIENT_INIT") {
-            qDebug() << "   → VPN tunnel established";
-            return;
+        QHostAddress senderAddress;
+        quint16 senderPort = 0;
+        if (m_socket->readDatagram(datagram.data(), datagram.size(), &senderAddress, &senderPort) < 0) {
+            qDebug() << "❌ Не удалось прочитать UDP-датаграмму:" << m_socket->errorString();
+            continue;
         }
 
-        // Обрабатываем пакет
-        handlePacket(clientSocket, data);
-    });
-
-    connect(clientSocket, &QTcpSocket::disconnected, this, [this, clientSocket]() {
-        qDebug() << "📡 Client disconnected";
-        // Очищаем UDP соединения этого клиента
-        for (auto it = udpConnections.begin(); it != udpConnections.end();) {
-            if (it.value().clientSocket == clientSocket) {
-                delete it.value().socket;
-                it = udpConnections.erase(it);
-            } else {
-                ++it;
-            }
+        TunnelFrame frame;
+        QString error;
+        if (!TunnelProtocol::decodeFrame(datagram, &frame, &error)) {
+            qDebug() << "❌ Не удалось разобрать туннельную датаграмму от"
+                     << senderAddress.toString() << ":" << senderPort << "-" << error;
+            continue;
         }
-    });
+
+        if (frame.type == TunnelPacketType::ClientHello) {
+            processClientHello(senderAddress, senderPort, frame);
+            continue;
+        }
+
+        if (frame.type == TunnelPacketType::Data) {
+            processEncryptedData(senderAddress, senderPort, frame);
+            continue;
+        }
+
+        qDebug() << "ℹ️ Получен управляющий кадр от" << senderAddress.toString() << ":" << senderPort
+                 << "тип:" << static_cast<int>(frame.type);
+    }
 }
 
-void VpnServer::handlePacket(QTcpSocket* clientSocket, const QByteArray& packet) {
-    qDebug() << "📨 Processing packet of size:" << packet.size() << "bytes";
+QString VpnServer::peerKey(const QHostAddress &address, quint16 port) const {
+    return QStringLiteral("%1:%2").arg(address.toString()).arg(port);
+}
 
-    if (packet.size() < 20) {
-        qDebug() << "   ⚠️ Packet too small:" << packet.size();
+bool VpnServer::sendFrame(const QHostAddress &address, quint16 port, const TunnelFrame &frame) {
+    const QByteArray datagram = TunnelProtocol::encodeFrame(frame);
+    const qint64 bytesSent = m_socket->writeDatagram(datagram, address, port);
+    if (bytesSent != datagram.size()) {
+        qDebug() << "❌ Не удалось отправить UDP-датаграмму клиенту"
+                 << address.toString() << ":" << port << "-" << m_socket->errorString();
+        return false;
+    }
+    return true;
+}
+
+bool VpnServer::processClientHello(const QHostAddress &address, quint16 port, const TunnelFrame &frame) {
+    ClientHelloPayload clientHello;
+    QString error;
+    if (!HandshakeProtocol::decodeClientHello(frame.payload, &clientHello, &error)) {
+        qDebug() << "❌ Некорректный ClientHello от" << address.toString() << ":" << port << "-" << error;
+        return false;
+    }
+
+    ClientSession session;
+    session.address = address;
+    session.port = port;
+    session.clientPublicKey = clientHello.publicKey;
+    session.clientRandom = clientHello.random;
+
+    if (!TunnelCrypto::generateX25519KeyPair(&session.serverPublicKey, &session.serverPrivateKey, &error)) {
+        qDebug() << "❌ Не удалось сгенерировать серверную ключевую пару:" << error;
+        return false;
+    }
+
+    if (!TunnelCrypto::randomBytes(TunnelCrypto::kRandomSize, &session.serverRandom, &error)) {
+        qDebug() << "❌ Не удалось сгенерировать серверную случайную последовательность:" << error;
+        return false;
+    }
+
+    QByteArray sessionIdBytes;
+    if (!TunnelCrypto::randomBytes(sizeof(quint32), &sessionIdBytes, &error)) {
+        qDebug() << "❌ Не удалось сгенерировать session id:" << error;
+        return false;
+    }
+
+    session.sessionId = qFromBigEndian<quint32>(reinterpret_cast<const uchar *>(sessionIdBytes.constData()));
+    if (session.sessionId == 0) {
+        session.sessionId = 1;
+    }
+
+    if (!TunnelCrypto::deriveServerSessionKeys(session.serverPrivateKey,
+                                               session.serverPublicKey,
+                                               session.serverRandom,
+                                               session.clientPublicKey,
+                                               session.clientRandom,
+                                               &session.keys,
+                                               &error)) {
+        qDebug() << "❌ Не удалось вывести серверные сессионные ключи:" << error;
+        return false;
+    }
+
+    session.established = true;
+    m_sessions.insert(peerKey(address, port), session);
+
+    ServerHelloPayload serverHello;
+    serverHello.publicKey = session.serverPublicKey;
+    serverHello.random = session.serverRandom;
+
+    TunnelFrame response;
+    response.type = TunnelPacketType::ServerHello;
+    response.sessionId = session.sessionId;
+    response.sequence = 1;
+    response.payload = HandshakeProtocol::encodeServerHello(serverHello);
+
+    qDebug() << "🤝 Handshake с клиентом" << address.toString() << ":" << port
+             << "завершён, session id:" << session.sessionId;
+
+    return sendFrame(address, port, response);
+}
+
+bool VpnServer::processEncryptedData(const QHostAddress &address, quint16 port, const TunnelFrame &frame) {
+    ClientSession *session = findSession(address, port);
+    if (!session || !session->established) {
+        qDebug() << "⚠️ Получен пакет данных от клиента без активной сессии"
+                 << address.toString() << ":" << port;
+        return false;
+    }
+
+    if (frame.sessionId != session->sessionId) {
+        qDebug() << "⚠️ Некорректный session id от клиента"
+                 << address.toString() << ":" << port
+                 << "ожидался:" << session->sessionId << "получен:" << frame.sessionId;
+        return false;
+    }
+
+    if ((frame.flags & TunnelProtocol::kFlagEncrypted) == 0) {
+        qDebug() << "⚠️ Получен незашифрованный пакет данных от клиента"
+                 << address.toString() << ":" << port;
+        return false;
+    }
+
+    const QByteArray aad = TunnelProtocol::encodeHeader(frame, static_cast<quint16>(frame.payload.size()));
+    QByteArray plaintext;
+    QString error;
+    if (!TunnelCrypto::decryptPacket(session->keys.rxKey,
+                                     session->keys.rxNoncePrefix,
+                                     frame.sequence,
+                                     aad,
+                                     frame.payload,
+                                     frame.authTag,
+                                     &plaintext,
+                                     &error)) {
+        qDebug() << "❌ Не удалось расшифровать пакет от клиента"
+                 << address.toString() << ":" << port << "-" << error;
+        return false;
+    }
+
+    quint8 ipVersion = 0;
+    if (!plaintext.isEmpty()) {
+        ipVersion = (static_cast<quint8>(plaintext[0]) >> 4) & 0x0F;
+    }
+
+    if (ipVersion != 4) {
+        qDebug() << "ℹ️ IPv6 или неизвестный IP-пакет временно пропущен. Текущий MVP сфокусирован на IPv4-only";
+        return false;
+    }
+
+    qDebug() << "📥 Получен IP-пакет от клиента" << address.toString() << ":" << port
+             << "размер:" << plaintext.size() << "байт, версия IP:" << ipVersion;
+
+    if (!m_tunDevice->isRunning()) {
+        qDebug() << "   → Linux TUN backend ещё не подключён, пакет принят только на уровне протокола";
+        return true;
+    }
+
+    if (!m_tunDevice->sendPacket(plaintext)) {
+        qDebug() << "⚠️ Не удалось передать IPv4-пакет в Linux TUN";
+        return false;
+    }
+
+    qDebug() << "   → IPv4-пакет передан в Linux TUN";
+
+    return true;
+}
+
+void VpnServer::onTunPacketReceived(const QByteArray &packet) {
+    if (packet.isEmpty()) {
         return;
     }
 
-    // Определяем версию IP
-    unsigned char version = (packet[0] >> 4) & 0x0F;
-    qDebug() << "   → IP version:" << (int)version;
-
-    if (version != 4 && version != 6) {
-        qDebug() << "   ⚠️ Unknown IP version:" << version << "- ignoring";
+    const quint8 ipVersion = (static_cast<quint8>(packet[0]) >> 4) & 0x0F;
+    if (ipVersion != 4) {
+        qDebug() << "ℹ️ Пакет из Linux TUN не является IPv4, временно пропускаем";
         return;
     }
 
-    if (version == 4) {
-        // IPv4
-        unsigned char protocol = packet[9];
-
-        qDebug() << "   → IPv4 packet, protocol:" << (int)protocol;
-
-        if (protocol == 1) { // ICMP
-            qDebug() << "   → Calling handleICMP...";
-            handleICMP(clientSocket, packet);
-        } else if (protocol == 6) { // TCP
-            handleTCP(clientSocket, packet);
-        } else if (protocol == 17) { // UDP
-            handleUDP(clientSocket, packet);
-        } else {
-            qDebug() << "   ⚠️ Unsupported protocol:" << protocol;
-        }
-    } else if (version == 6) {
-        qDebug() << "   → IPv6 packet";
-        // Определяем протокол в IPv6 (следующий заголовок)
-        if (packet.size() > 40) {
-            unsigned char nextHeader = packet[6];
-
-            if (nextHeader == 1 || nextHeader == 58 ) { // ICMPv6
-                handleICMPv6(clientSocket, packet);
-            } else if (nextHeader == 6) { // TCP
-                handleTCP(clientSocket, packet);
-            } else if (nextHeader == 17) { // UDP
-                handleUDPv6(clientSocket, packet);
-            } else {
-                qDebug() << "   ⚠️ Unsupported IPv6 protocol:" << nextHeader;
-            }
-        }
-    } else {
-        qDebug() << "   ⚠️ Unknown IP version:" << version;
-    }
-}
-
-void VpnServer::handleICMPv6(QTcpSocket* clientSocket, const QByteArray& packet) {
-    qDebug() << "   → ICMPv6 packet (ignored for now)";
-    // ICMPv6 нужно для IPv6邻居发现, пока игнорируем
-}
-
-void VpnServer::handleUDPv6(QTcpSocket* clientSocket, const QByteArray& packet) {
-    qDebug() << "   → UDPv6 packet";
-    // Для простоты - эхо
-    clientSocket->write(packet);
-}
-
-void VpnServer::handleICMP(QTcpSocket* clientSocket, const QByteArray& packet) {
-    if (packet.size() < 28) return;
-
-    // Быстрое извлечение IP адресов
-    quint32 sourceIP = ((quint32)(unsigned char)packet[12] << 24) |
-                       ((quint32)(unsigned char)packet[13] << 16) |
-                       ((quint32)(unsigned char)packet[14] << 8) |
-                       ((quint32)(unsigned char)packet[15]);
-
-    quint32 destIP = ((quint32)(unsigned char)packet[16] << 24) |
-                     ((quint32)(unsigned char)packet[17] << 16) |
-                     ((quint32)(unsigned char)packet[18] << 8) |
-                     ((quint32)(unsigned char)packet[19]);
-
-    // Проверяем тип ICMP
-    unsigned char icmpType = packet[20];
-
-    // Обрабатываем только Echo Request
-    if (icmpType != 8) return;
-
-    // Создаем ответный пакет (без копирования всего пакета)
-    QByteArray response = packet;
-
-    // Меняем IP адреса местами
-    response[12] = packet[16];
-    response[13] = packet[17];
-    response[14] = packet[18];
-    response[15] = packet[19];
-    response[16] = packet[12];
-    response[17] = packet[13];
-    response[18] = packet[14];
-    response[19] = packet[15];
-
-    // Меняем тип ICMP на Echo Reply
-    response[20] = 0;
-
-    // Быстрый пересчет checksum
-    response[22] = 0;
-    response[23] = 0;
-
-    quint32 sum = 0;
-    const quint16* data = reinterpret_cast<const quint16*>(response.data() + 20);
-    int size = response.size() - 20;
-    for (int i = 0; i < size / 2; ++i) {
-        sum += data[i];
-        if (sum & 0xFFFF0000) {
-            sum = (sum & 0xFFFF) + (sum >> 16);
-        }
-    }
-    if (size & 1) {
-        sum += *reinterpret_cast<const quint8*>(response.data() + 20 + size - 1);
-        if (sum & 0xFFFF0000) {
-            sum = (sum & 0xFFFF) + (sum >> 16);
-        }
-    }
-    sum = ~sum & 0xFFFF;
-    response[22] = (sum >> 8) & 0xFF;
-    response[23] = sum & 0xFF;
-
-    // НЕМЕДЛЕННАЯ отправка ответа
-    clientSocket->write(response);
-    clientSocket->flush(); // Принудительная отправка
-}
-
-void VpnServer::handleTCP(QTcpSocket* clientSocket, const QByteArray& packet) {
-    qDebug() << "   → TCP packet (TCP forwarding not fully implemented yet)";
-    // TODO: Реализовать TCP проксирование
-    // Это сложнее, требует установки отдельного TCP соединения
-    clientSocket->write(packet); // Пока просто эхо
-}
-
-void VpnServer::handleUDP(QTcpSocket* clientSocket, const QByteArray& packet) {
-    if (packet.size() < 28) return; // IP заголовок (20) + UDP заголовок (8)
-
-    quint32 destIP = extractDestIP(packet);
-    quint16 destPort = extractDestPort(packet);
-
-    QHostAddress destAddr(destIP);
-
-    qDebug() << "   → UDP packet to:" << destAddr.toString() << ":" << destPort;
-
-    // ========== DNS ФОРВАРДЕР ==========
-    // Перенаправляем все DNS запросы (порт 53) на Google DNS
-    bool isDNSRequest = (destPort == 53);
-
-    if (isDNSRequest) {
-        qDebug() << "      → DNS request detected!";
-        // Перенаправляем на Google Public DNS
-        destAddr = QHostAddress("8.8.8.8");
-        destPort = 53;
-        qDebug() << "      → Redirecting to Google DNS: 8.8.8.8:53";
-    }
-    // ==================================
-
-    // Извлекаем UDP данные (после IP и UDP заголовков)
-    int ipHeaderLen = (packet[0] & 0x0F) * 4;
-    int udpDataOffset = ipHeaderLen + 8; // IP header + UDP header
-
-    if (packet.size() <= udpDataOffset) return;
-
-    QByteArray udpData = packet.mid(udpDataOffset);
-
-    // Для DNS запросов можно вывести информацию
-    if (isDNSRequest && udpData.size() > 12) {
-        // Извлекаем доменное имя из DNS запроса (упрощённо)
-        int pos = 12; // Пропускаем DNS заголовок
-        if (udpData.size() > pos) {
-            QString domain;
-            while (pos < udpData.size()) {
-                unsigned char len = udpData[pos];
-                if (len == 0) break;
-                pos++;
-                if (pos + len <= udpData.size()) {
-                    domain += QString::fromLatin1(udpData.mid(pos, len)) + ".";
-                    pos += len;
-                } else {
-                    break;
-                }
-            }
-            if (!domain.isEmpty()) {
-                qDebug() << "      → DNS query for:" << domain;
-            }
-        }
+    ClientSession *session = activeSession();
+    if (!session) {
+        qDebug() << "⚠️ Нет активной клиентской сессии для отправки пакета из Linux TUN";
+        return;
     }
 
-    // Создаем уникальный ID для соединения (учитываем перенаправление)
-    quint64 connId = getConnectionId(destAddr, destPort);
-    // Добавляем ID клиента в connId, чтобы разные клиенты не мешали друг другу
-    quint64 clientId = (quint64)clientSocket;
-    quint64 fullConnId = connId ^ clientId; // XOR для уникальности
+    TunnelFrame frame;
+    frame.type = TunnelPacketType::Data;
+    frame.flags = TunnelProtocol::kFlagEncrypted;
+    frame.sessionId = session->sessionId;
+    frame.sequence = session->nextServerSequence++;
 
-    if (!udpConnections.contains(fullConnId)) {
-        UDPConnection conn;
-        conn.socket = new QUdpSocket(this);
-        conn.clientSocket = clientSocket;
-        conn.targetAddress = destAddr;
-        conn.targetPort = destPort;
-
-        // Сохраняем оригинальный адрес для DNS (для логов)
-        if (isDNSRequest) {
-            qDebug() << "      → Created DNS forwarder socket";
-        }
-
-        // Подключаем сигнал готовности к чтению
-        connect(conn.socket, &QUdpSocket::readyRead, this, [this, clientSocket, fullConnId, isDNSRequest]() {
-            if (!udpConnections.contains(fullConnId)) return;
-
-            UDPConnection& conn = udpConnections[fullConnId];
-            while (conn.socket->hasPendingDatagrams()) {
-                QByteArray responseData;
-                responseData.resize(conn.socket->pendingDatagramSize());
-                QHostAddress senderAddr;
-                quint16 senderPort;
-
-                conn.socket->readDatagram(responseData.data(), responseData.size(),
-                                          &senderAddr, &senderPort);
-
-                if (isDNSRequest) {
-                    qDebug() << "      ← DNS response from:" << senderAddr.toString() << ":" << senderPort
-                             << "(size:" << responseData.size() << "bytes)";
-                } else {
-                    qDebug() << "      ← UDP response from:" << senderAddr.toString() << ":" << senderPort;
-                }
-
-                // Отправляем ответ обратно клиенту
-                clientSocket->write(responseData);
-            }
-        });
-
-        udpConnections[fullConnId] = conn;
-
-        if (!isDNSRequest) {
-            qDebug() << "      → Created new UDP socket for" << destAddr.toString() << ":" << destPort;
-        }
+    const QByteArray aad = TunnelProtocol::encodeHeader(frame, static_cast<quint16>(packet.size()));
+    QString error;
+    if (!TunnelCrypto::encryptPacket(session->keys.txKey,
+                                     session->keys.txNoncePrefix,
+                                     frame.sequence,
+                                     aad,
+                                     packet,
+                                     &frame.payload,
+                                     &frame.authTag,
+                                     &error)) {
+        qDebug() << "❌ Не удалось зашифровать пакет из Linux TUN для клиента:" << error;
+        return;
     }
 
-    // Отправляем UDP датаграмму
-    UDPConnection& conn = udpConnections[fullConnId];
-    conn.socket->writeDatagram(udpData, conn.targetAddress, conn.targetPort);
-
-    if (isDNSRequest) {
-        qDebug() << "      → DNS query forwarded to" << conn.targetAddress.toString() << ":" << conn.targetPort
-                 << "(" << udpData.size() << "bytes)";
-    } else {
-        qDebug() << "      → UDP datagram sent (" << udpData.size() << "bytes)";
+    if (!sendFrame(session->address, session->port, frame)) {
+        return;
     }
+
+    qDebug() << "📤 IPv4-пакет из Linux TUN отправлен клиенту"
+             << session->address.toString() << ":" << session->port
+             << "размер:" << packet.size() << "байт";
 }
 
-quint32 VpnServer::extractDestIP(const QByteArray& packet) {
-    if (packet.size() < 24) return 0;
-    // IP заголовок: байты 16-19 - destination IP
-    return ((quint32)(unsigned char)packet[16] << 24) |
-           ((quint32)(unsigned char)packet[17] << 16) |
-           ((quint32)(unsigned char)packet[18] << 8) |
-           ((quint32)(unsigned char)packet[19]);
+void VpnServer::onTunError(const QString &error) {
+    qDebug() << "❌ Ошибка Linux TUN backend:" << error;
 }
 
-quint16 VpnServer::extractDestPort(const QByteArray& packet) {
-    if (packet.size() < 22) return 0;
-    int ipHeaderLen = (packet[0] & 0x0F) * 4;
-    if (packet.size() < ipHeaderLen + 2) return 0;
-    // UDP/TCP заголовок: байты 2-3 - destination port
-    return ((quint16)(unsigned char)packet[ipHeaderLen + 2] << 8) |
-           ((quint16)(unsigned char)packet[ipHeaderLen + 3]);
+VpnServer::ClientSession *VpnServer::findSession(const QHostAddress &address, quint16 port) {
+    const QString key = peerKey(address, port);
+    auto it = m_sessions.find(key);
+    if (it == m_sessions.end()) {
+        return nullptr;
+    }
+    return &it.value();
 }
 
-quint64 VpnServer::getConnectionId(const QHostAddress& addr, quint16 port) {
-    return ((quint64)addr.toIPv4Address() << 32) | port;
+VpnServer::ClientSession *VpnServer::activeSession() {
+    for (auto it = m_sessions.begin(); it != m_sessions.end(); ++it) {
+        if (it->established) {
+            return &it.value();
+        }
+    }
+    return nullptr;
 }
