@@ -2,6 +2,7 @@ cmake_minimum_required(VERSION 3.19)
 project(VPN_client LANGUAGES CXX)  # Исправлено имя проекта
 
 find_package(Qt6 6.5 REQUIRED COMPONENTS Core Network)
+find_package(OpenSSL REQUIRED)
 
 qt_standard_project_setup()
 
@@ -17,6 +18,10 @@ qt_add_executable(VPN_cLeint
     vpnclient.cpp
     tunnelclient.h
     tunnelclient.cpp
+    tunnelcrypto.h
+    tunnelcrypto.cpp
+    handshakeprotocol.h
+    handshakeprotocol.cpp
     tunnelprotocol.h
     tunnelprotocol.cpp
     wintunadapter.h
@@ -31,6 +36,7 @@ target_link_libraries(VPN_cLeint  # И здесь то же имя
     PRIVATE
         Qt::Core
         Qt6::Network
+        OpenSSL::Crypto
         ${CMAKE_DL_LIBS}
 )
 

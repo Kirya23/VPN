@@ -13,6 +13,7 @@ VpnClient::VpnClient(QObject *parent)
     connect(m_tunAdapter, &WintunAdapter::adapterReady, this, &VpnClient::onTunReady);
 
     connect(m_tunnelClient, &TunnelClient::started, this, &VpnClient::onTunnelStarted);
+    connect(m_tunnelClient, &TunnelClient::sessionEstablished, this, &VpnClient::onTunnelSessionEstablished);
     connect(m_tunnelClient, &TunnelClient::ipPacketReceived, this, &VpnClient::onTunnelPacketReceived);
     connect(m_tunnelClient, &TunnelClient::controlFrameReceived, this, &VpnClient::onControlFrameReceived);
     connect(m_tunnelClient, &TunnelClient::errorOccurred, this, &VpnClient::onTunnelError);
@@ -40,6 +41,11 @@ void VpnClient::cleanup() {
 
 void VpnClient::onTunnelStarted() {
     qDebug() << "✅ Туннельный транспорт запущен";
+    qDebug() << "⏳ Ждём подтверждения сессии от сервера перед запуском TUN-адаптера";
+}
+
+void VpnClient::onTunnelSessionEstablished() {
+    qDebug() << "✅ Туннельная сессия установлена";
 
     if (!m_tunAdapter->initialize("MyVPN")) {
         qDebug() << "Не удалось инициализировать TUN-адаптер";

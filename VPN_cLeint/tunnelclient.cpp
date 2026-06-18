@@ -22,6 +22,7 @@ TunnelClient::TunnelClient(QObject *parent)
     , m_nextSequence(1)
     , m_udpResetNoticeShown(false)
     , m_running(false)
+    , m_state(TunnelClientState::Stopped)
 {
     connect(m_socket, &QUdpSocket::readyRead, this, &TunnelClient::onReadyRead);
     connect(m_socket, &QUdpSocket::errorOccurred, this, &TunnelClient::onSocketError);
@@ -45,16 +46,19 @@ bool TunnelClient::start(const QString &serverAddress, quint16 serverPort) {
     configurePlatformSocketOptions();
 
     m_serverPort = serverPort;
+    m_sessionId = 0;
     m_nextSequence = 1;
     m_udpResetNoticeShown = false;
     m_running = true;
+    m_state = TunnelClientState::Handshake;
 
-    if (!sendControlPacket(TunnelPacketType::ClientHello, QByteArrayLiteral("qt-vpn-mvp"))) {
+    if (!beginHandshake()) {
         stop();
         return false;
     }
 
     qDebug() << "✅ Туннельный транспорт по UDP готов ->" << m_serverAddress.toString() << ":" << m_serverPort;
+    qDebug() << "⏳ Ожидаем завершения handshake с сервером...";
     emit started();
     return true;
 }
@@ -65,17 +69,44 @@ void TunnelClient::stop() {
     }
 
     m_running = false;
+    m_state = TunnelClientState::Stopped;
+    m_sessionId = 0;
+    m_nextSequence = 1;
+    m_clientPublicKey.clear();
+    m_clientPrivateKey.clear();
+    m_clientRandom.clear();
+    m_sessionKeys = TunnelSessionKeys();
     m_udpResetNoticeShown = false;
     m_socket->close();
     emit stopped();
 }
 
 bool TunnelClient::sendIpPacket(const QByteArray &packet) {
+    if (m_state != TunnelClientState::Established) {
+        emit errorOccurred(QStringLiteral("Нельзя отправить IP-пакет: handshake ещё не завершён"));
+        return false;
+    }
+
     TunnelFrame frame;
     frame.type = TunnelPacketType::Data;
+    frame.flags = TunnelProtocol::kFlagEncrypted;
     frame.sessionId = m_sessionId;
     frame.sequence = m_nextSequence++;
-    frame.payload = packet;
+    const QByteArray aad = TunnelProtocol::encodeHeader(frame, static_cast<quint16>(packet.size()));
+
+    QString error;
+    if (!TunnelCrypto::encryptPacket(m_sessionKeys.txKey,
+                                     m_sessionKeys.txNoncePrefix,
+                                     frame.sequence,
+                                     aad,
+                                     packet,
+                                     &frame.payload,
+                                     &frame.authTag,
+                                     &error)) {
+        emit errorOccurred(QStringLiteral("Не удалось зашифровать IP-пакет: %1").arg(error));
+        return false;
+    }
+
     return sendFrame(frame);
 }
 
@@ -120,8 +151,37 @@ void TunnelClient::onReadyRead() {
         m_udpResetNoticeShown = false;
 
         if (frame.type == TunnelPacketType::Data) {
-            emit ipPacketReceived(frame.payload);
+            if (m_state != TunnelClientState::Established) {
+                emit errorOccurred(QStringLiteral("Получен пакет данных до завершения handshake"));
+                continue;
+            }
+
+            if ((frame.flags & TunnelProtocol::kFlagEncrypted) == 0) {
+                emit errorOccurred(QStringLiteral("Получен незашифрованный пакет данных от сервера"));
+                continue;
+            }
+
+            const QByteArray aad = TunnelProtocol::encodeHeader(frame, static_cast<quint16>(frame.payload.size()));
+            QByteArray plaintext;
+            if (!TunnelCrypto::decryptPacket(m_sessionKeys.rxKey,
+                                             m_sessionKeys.rxNoncePrefix,
+                                             frame.sequence,
+                                             aad,
+                                             frame.payload,
+                                             frame.authTag,
+                                             &plaintext,
+                                             &error)) {
+                emit errorOccurred(QStringLiteral("Не удалось расшифровать пакет от сервера: %1").arg(error));
+                continue;
+            }
+
+            emit ipPacketReceived(plaintext);
         } else {
+            if (frame.type == TunnelPacketType::ServerHello && m_state == TunnelClientState::Handshake) {
+                if (!finishHandshake(frame)) {
+                    continue;
+                }
+            }
             emit controlFrameReceived(frame);
         }
     }
@@ -186,6 +246,59 @@ bool TunnelClient::resolveServerAddress(const QString &serverAddress) {
     }
 
     return false;
+}
+
+bool TunnelClient::beginHandshake() {
+    QString error;
+    if (!TunnelCrypto::generateX25519KeyPair(&m_clientPublicKey, &m_clientPrivateKey, &error)) {
+        emit errorOccurred(QStringLiteral("Не удалось сгенерировать клиентскую ключевую пару: %1").arg(error));
+        return false;
+    }
+
+    if (!TunnelCrypto::randomBytes(TunnelCrypto::kRandomSize, &m_clientRandom, &error)) {
+        emit errorOccurred(QStringLiteral("Не удалось сгенерировать клиентскую случайную последовательность: %1").arg(error));
+        return false;
+    }
+
+    ClientHelloPayload hello;
+    hello.publicKey = m_clientPublicKey;
+    hello.random = m_clientRandom;
+
+    return sendControlPacket(TunnelPacketType::ClientHello, HandshakeProtocol::encodeClientHello(hello));
+}
+
+bool TunnelClient::finishHandshake(const TunnelFrame &frame) {
+    ServerHelloPayload serverHello;
+    QString error;
+    if (!HandshakeProtocol::decodeServerHello(frame.payload, &serverHello, &error)) {
+        emit errorOccurred(QStringLiteral("Не удалось разобрать ServerHello: %1").arg(error));
+        return false;
+    }
+
+    if (frame.sessionId == 0) {
+        emit errorOccurred(QStringLiteral("Сервер вернул некорректный session id"));
+        return false;
+    }
+
+    TunnelSessionKeys derivedKeys;
+    if (!TunnelCrypto::deriveClientSessionKeys(m_clientPrivateKey,
+                                               m_clientPublicKey,
+                                               m_clientRandom,
+                                               serverHello.publicKey,
+                                               serverHello.random,
+                                               &derivedKeys,
+                                               &error)) {
+        emit errorOccurred(QStringLiteral("Не удалось вывести сессионные ключи: %1").arg(error));
+        return false;
+    }
+
+    m_sessionId = frame.sessionId;
+    m_sessionKeys = derivedKeys;
+    m_state = TunnelClientState::Established;
+
+    qDebug() << "🔐 Handshake завершён, session id:" << m_sessionId;
+    emit sessionEstablished();
+    return true;
 }
 
 bool TunnelClient::sendFrame(const TunnelFrame &frame) {

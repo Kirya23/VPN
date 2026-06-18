@@ -40,10 +40,9 @@ quint64 readUint64(const char *data) {
 
 } // namespace
 
-QByteArray TunnelProtocol::encodeFrame(const TunnelFrame &frame) {
+QByteArray TunnelProtocol::encodeHeader(const TunnelFrame &frame, quint16 payloadLength) {
     QByteArray encoded;
-    encoded.reserve(kHeaderSize + frame.payload.size());
-
+    encoded.reserve(kHeaderSize);
     appendUint32(&encoded, kMagic);
     encoded.append(static_cast<char>(kVersion));
     encoded.append(static_cast<char>(frame.type));
@@ -51,9 +50,17 @@ QByteArray TunnelProtocol::encodeFrame(const TunnelFrame &frame) {
     encoded.append(char(0));
     appendUint32(&encoded, frame.sessionId);
     appendUint64(&encoded, frame.sequence);
-    appendUint16(&encoded, static_cast<quint16>(frame.payload.size()));
-    encoded.append(frame.payload);
+    appendUint16(&encoded, payloadLength);
+    return encoded;
+}
 
+QByteArray TunnelProtocol::encodeFrame(const TunnelFrame &frame) {
+    QByteArray encoded = encodeHeader(frame, static_cast<quint16>(frame.payload.size()));
+    encoded.reserve(encoded.size() + frame.payload.size() + frame.authTag.size());
+    encoded.append(frame.payload);
+    if (frame.flags & kFlagEncrypted) {
+        encoded.append(frame.authTag);
+    }
     return encoded;
 }
 
@@ -89,8 +96,12 @@ bool TunnelProtocol::decodeFrame(const QByteArray &datagram, TunnelFrame *frame,
         return false;
     }
 
+    const quint8 flags = static_cast<quint8>(data[6]);
+    const bool encrypted = (flags & kFlagEncrypted) != 0;
+    const int authTagSize = encrypted ? kAuthTagSize : 0;
+
     const quint16 payloadLength = readUint16(data + 20);
-    if (datagram.size() != kHeaderSize + payloadLength) {
+    if (datagram.size() != kHeaderSize + payloadLength + authTagSize) {
         if (error) {
             *error = QStringLiteral("Длина датаграммы не совпадает с заголовком туннеля");
         }
@@ -98,10 +109,11 @@ bool TunnelProtocol::decodeFrame(const QByteArray &datagram, TunnelFrame *frame,
     }
 
     frame->type = static_cast<TunnelPacketType>(static_cast<quint8>(data[5]));
-    frame->flags = static_cast<quint8>(data[6]);
+    frame->flags = flags;
     frame->sessionId = readUint32(data + 8);
     frame->sequence = readUint64(data + 12);
     frame->payload = datagram.mid(kHeaderSize, payloadLength);
+    frame->authTag = encrypted ? datagram.right(authTagSize) : QByteArray();
 
     return true;
 }
