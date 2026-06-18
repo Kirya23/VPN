@@ -16,6 +16,7 @@ WintunAdapter::WintunAdapter(QObject *parent)
     , m_stopEvent(nullptr)
     , m_running(false)
     , pWintunCreateAdapter(nullptr)
+    , pWintunOpenAdapter(nullptr)
     , pWintunCloseAdapter(nullptr)
     , pWintunStartSession(nullptr)
     , pWintunEndSession(nullptr)
@@ -38,32 +39,45 @@ bool WintunAdapter::initialize(const QString &adapterName) {
 
     // Загружаем Wintun DLL
     if (!loadWintunLibrary()) {
-        emit errorOccurred("Failed to load wintun.dll");
+        emit errorOccurred("Не удалось загрузить wintun.dll");
         return false;
     }
 
     // Проверяем версию драйвера
     DWORD version = pWintunGetRunningDriverVersion();
     if (version == 0) {
-        emit errorOccurred("Wintun driver not loaded or error getting version");
-        return false;
+        // Не фатальная ошибка, просто предупреждение
+        qDebug() << "Предупреждение: проверка версии драйвера Wintun вернула 0";
+    } else {
+        qDebug() << "Версия драйвера Wintun:" << version;
     }
-    qDebug() << "Wintun driver version:" << version;
 
-    // Создаем адаптер (или открываем существующий)
+    // Создаем адаптер
     std::wstring wideName = m_adapterName.toStdWString();
-    m_adapter = pWintunCreateAdapter(wideName.c_str(), L"Wintun", &MY_VPN_GUID);
+
+    // Пробуем создать новый адаптер
+    m_adapter = pWintunCreateAdapter(wideName.c_str(), L"Wintun", nullptr);
 
     if (!m_adapter) {
-        // Если не удалось создать, возможно адаптер уже существует - пробуем открыть
-        m_adapter = pWintunOpenAdapter(wideName.c_str());
-        if (!m_adapter) {
-            emit errorOccurred("Failed to create or open Wintun adapter");
+        DWORD error = GetLastError();
+        qDebug() << "Не удалось создать адаптер, код ошибки:" << error;
+
+        // Если не удалось создать, пробуем открыть существующий
+        if (pWintunOpenAdapter) {
+            m_adapter = pWintunOpenAdapter(wideName.c_str());
+            if (m_adapter) {
+                qDebug() << "Открыт существующий адаптер:" << m_adapterName;
+            } else {
+                qDebug() << "Не удалось открыть существующий адаптер, код ошибки:" << GetLastError();
+                emit errorOccurred("Не удалось создать или открыть Wintun-адаптер");
+                return false;
+            }
+        } else {
+            emit errorOccurred("Функция WintunOpenAdapter не загружена");
             return false;
         }
-        qDebug() << "Opened existing adapter:" << m_adapterName;
     } else {
-        qDebug() << "Created new adapter:" << m_adapterName;
+        qDebug() << "Создан новый адаптер:" << m_adapterName;
     }
 
     return true;
@@ -72,23 +86,23 @@ bool WintunAdapter::initialize(const QString &adapterName) {
 bool WintunAdapter::start() {
     if (m_running) return true;
 
-    // Запускаем сессию с кольцевым буфером (емкость 2 МБ - хороший выбор)
-    const DWORD ringCapacity = 0x200000; // 2 MiB
+    // Запускаем сессию с кольцевым буфером
+    const DWORD ringCapacity = 0x1000000; // 16 MiB
     m_session = pWintunStartSession(m_adapter, ringCapacity);
 
     if (!m_session) {
-        emit errorOccurred("Failed to start Wintun session");
+        emit errorOccurred("Не удалось запустить сессию Wintun");
         return false;
     }
 
-    qDebug() << "Wintun session started with ring capacity:" << ringCapacity;
+    qDebug() << "Сессия Wintun запущена, размер кольцевого буфера:" << ringCapacity;
 
     // Создаем событие для остановки потока чтения
     m_stopEvent = CreateEvent(nullptr, TRUE, FALSE, nullptr);
     if (!m_stopEvent) {
         pWintunEndSession(m_session);
         m_session = nullptr;
-        emit errorOccurred("Failed to create stop event");
+        emit errorOccurred("Не удалось создать событие остановки");
         return false;
     }
 
@@ -108,12 +122,12 @@ bool WintunAdapter::start() {
         m_stopEvent = nullptr;
         pWintunEndSession(m_session);
         m_session = nullptr;
-        emit errorOccurred("Failed to create reader thread");
+        emit errorOccurred("Не удалось создать поток чтения");
         return false;
     }
 
     emit adapterReady();
-    qDebug() << "Wintun adapter is running and ready to capture traffic";
+    qDebug() << "Wintun-адаптер запущен и готов перехватывать трафик";
 
     return true;
 }
@@ -153,7 +167,7 @@ void WintunAdapter::stop() {
         m_adapter = nullptr;
     }
 
-    qDebug() << "Wintun adapter stopped";
+    qDebug() << "Wintun-адаптер остановлен";
 }
 
 bool WintunAdapter::sendPacket(const QByteArray &packet) {
@@ -164,7 +178,7 @@ bool WintunAdapter::sendPacket(const QByteArray &packet) {
     if (!outPacket) {
         // ERROR_BUFFER_OVERFLOW означает, что кольцевой буфер заполнен - пакет дропаем[citation:2]
         if (GetLastError() != ERROR_BUFFER_OVERFLOW) {
-            qDebug() << "Failed to allocate send packet, error:" << GetLastError();
+            qDebug() << "Не удалось выделить буфер для исходящего пакета, код ошибки:" << GetLastError();
         }
         return false;
     }
@@ -194,38 +208,36 @@ QByteArray WintunAdapter::receivePacket() {
 }
 
 void WintunAdapter::readerThreadFunction() {
-    qDebug() << "Wintun reader thread started";
+    qDebug() << "Поток чтения Wintun запущен (режим высокой производительности)";
 
     while (m_running) {
-        // Ждем появления пакетов или сигнала остановки[citation:2][citation:3]
+        // Уменьшаем время ожидания для более быстрого отклика
         HANDLE waitHandles[2] = { m_stopEvent, pWintunGetReadWaitEvent(m_session) };
-        DWORD waitResult = WaitForMultipleObjects(2, waitHandles, FALSE, INFINITE);
+        DWORD waitResult = WaitForMultipleObjects(2, waitHandles, FALSE, 50); // Таймаут 50ms
 
-        // Если остановили - выходим
         if (waitResult == WAIT_OBJECT_0) {
             break;
         }
 
-        // Читаем все доступные пакеты
+        // Читаем ВСЕ доступные пакеты сразу
         while (m_running) {
             QByteArray packet = receivePacket();
             if (packet.isEmpty()) {
-                break; // Нет больше пакетов
+                break;
             }
 
-            // Отправляем пакет в главный поток через сигнал
+            // Отправляем в главный поток через сигнал
             emit packetReceived(packet);
         }
     }
-
-    qDebug() << "Wintun reader thread stopped";
+    qDebug() << "Поток чтения Wintun остановлен";
 }
 
 bool WintunAdapter::loadWintunLibrary() {
     // Пробуем загрузить wintun.dll из той же директории
     m_wintunDll = LoadLibraryW(L"wintun.dll");
     if (!m_wintunDll) {
-        qDebug() << "Failed to load wintun.dll, error:" << GetLastError();
+        qDebug() << "Не удалось загрузить wintun.dll, код ошибки:" << GetLastError();
         return false;
     }
 
@@ -233,11 +245,12 @@ bool WintunAdapter::loadWintunLibrary() {
 #define LOAD_FUNC(name) \
     p##name = (name##_t)GetProcAddress(m_wintunDll, #name); \
         if (!p##name) { \
-            qDebug() << "Failed to load function:" #name; \
+            qDebug() << "Не удалось загрузить функцию:" #name; \
             return false; \
     }
 
     LOAD_FUNC(WintunCreateAdapter);
+    LOAD_FUNC(WintunOpenAdapter);
     LOAD_FUNC(WintunCloseAdapter);
     LOAD_FUNC(WintunStartSession);
     LOAD_FUNC(WintunEndSession);
@@ -250,7 +263,7 @@ bool WintunAdapter::loadWintunLibrary() {
 
 #undef LOAD_FUNC
 
-    qDebug() << "Wintun library loaded successfully";
+    qDebug() << "Библиотека Wintun успешно загружена";
     return true;
 }
 
@@ -262,6 +275,7 @@ void WintunAdapter::unloadWintunLibrary() {
 
     // Обнуляем все указатели
     pWintunCreateAdapter = nullptr;
+    pWintunOpenAdapter = nullptr;
     pWintunCloseAdapter = nullptr;
     pWintunStartSession = nullptr;
     pWintunEndSession = nullptr;

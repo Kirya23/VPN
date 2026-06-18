@@ -13,6 +13,12 @@ set(CMAKE_AUTOMOC ON)
 
 qt_add_executable(VPN_cLeint
     main.cpp
+    vpnclient.h
+    vpnclient.cpp
+    tunnelclient.h
+    tunnelclient.cpp
+    tunnelprotocol.h
+    tunnelprotocol.cpp
     wintunadapter.h
     wintunadapter.cpp
 )
