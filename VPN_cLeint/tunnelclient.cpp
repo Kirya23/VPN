@@ -15,6 +15,11 @@
 #endif
 #endif
 
+namespace {
+constexpr int kKeepaliveIntervalMs = 5000;
+constexpr qint64 kServerSilenceTimeoutMs = 60000;
+}
+
 TunnelClient::TunnelClient(QObject *parent)
     : QObject(parent)
     , m_socket(new QUdpSocket(this))
@@ -32,7 +37,7 @@ TunnelClient::TunnelClient(QObject *parent)
     connect(m_socket, &QUdpSocket::readyRead, this, &TunnelClient::onReadyRead);
     connect(m_socket, &QUdpSocket::errorOccurred, this, &TunnelClient::onSocketError);
 
-    m_keepaliveTimer->setInterval(5000);
+    m_keepaliveTimer->setInterval(kKeepaliveIntervalMs);
     connect(m_keepaliveTimer, &QTimer::timeout, this, &TunnelClient::onKeepaliveTimer);
 
     m_connectionMonitorTimer->setInterval(1000);
@@ -347,7 +352,7 @@ void TunnelClient::onConnectionMonitorTimer() {
     }
 
     const qint64 now = QDateTime::currentMSecsSinceEpoch();
-    if (now - m_lastServerActivityMs > 15000) {
+    if (now - m_lastServerActivityMs > kServerSilenceTimeoutMs) {
         m_connectionAlive = false;
         emit connectionLost();
     }

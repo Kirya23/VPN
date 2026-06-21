@@ -69,6 +69,7 @@ private:
     bool m_serverBypassInstalled = false;
     bool m_legacyTestRouteEnabled = false;
     bool m_reconnectInProgress = false;
+    bool m_tunForwardingEnabled = false;
     QList<WindowsDnsBackup> m_dnsBackups;
 };
 

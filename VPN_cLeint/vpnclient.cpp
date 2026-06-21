@@ -53,6 +53,7 @@ bool VpnClient::start(const QString &serverAddress, quint16 port) {
     m_serverAddress = serverAddress;
     m_serverPort = port;
     m_reconnectInProgress = false;
+    m_tunForwardingEnabled = false;
     qDebug() << "Подключаемся к VPN-серверу" << serverAddress << ":" << port << "по UDP";
     return m_tunnelClient->start(serverAddress, port);
 }
@@ -66,6 +67,7 @@ void VpnClient::cleanup() {
 
     m_reconnectTimer->stop();
     m_reconnectInProgress = false;
+    m_tunForwardingEnabled = false;
     m_tunnelClient->stop();
     m_tunAdapter->stop();
 }
@@ -78,6 +80,7 @@ void VpnClient::onTunnelStarted() {
 void VpnClient::onTunnelSessionEstablished() {
     m_reconnectTimer->stop();
     m_reconnectInProgress = false;
+    m_tunForwardingEnabled = false;
     qDebug() << "✅ Туннельная сессия установлена";
 
     if (!m_tunAdapter->initialize("MyVPN")) {
@@ -99,6 +102,7 @@ void VpnClient::onTunnelConnectionLost() {
     }
 
     m_reconnectInProgress = true;
+    m_tunForwardingEnabled = false;
 
 #ifdef Q_OS_WIN
     cleanupWindowsRoutes();
@@ -140,12 +144,17 @@ void VpnClient::onTunReady() {
         return;
     }
 
+    m_tunForwardingEnabled = true;
     qDebug() << "   → Клиентская сторона VPN-туннеля готова";
 #endif
 }
 
 void VpnClient::onTunPacketReceived(const QByteArray &packet) {
     if (packet.size() < 20) {
+        return;
+    }
+
+    if (!m_tunForwardingEnabled || m_reconnectInProgress || !m_tunnelClient->isSessionEstablished()) {
         return;
     }
 

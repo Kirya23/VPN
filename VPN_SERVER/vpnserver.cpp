@@ -4,6 +4,10 @@
 #include <QDebug>
 #include <QtEndian>
 
+namespace {
+constexpr qint64 kClientSessionIdleTimeoutMs = 60000;
+}
+
 VpnServer::VpnServer(QObject *parent)
     : QObject(parent)
     , m_socket(new QUdpSocket(this))
@@ -274,7 +278,7 @@ void VpnServer::onSessionMaintenance() {
         ClientSession &session = it.value();
 
         if (session.established) {
-            if (now - session.lastActivityMs > 15000) {
+            if (now - session.lastActivityMs > kClientSessionIdleTimeoutMs) {
                 qDebug() << "📴 Клиент" << session.address.toString() << ":" << session.port << "отключён";
                 it = m_sessions.erase(it);
                 continue;
