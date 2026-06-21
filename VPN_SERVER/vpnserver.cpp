@@ -160,8 +160,7 @@ bool VpnServer::processClientHello(const QHostAddress &address, quint16 port, co
 bool VpnServer::processEncryptedData(const QHostAddress &address, quint16 port, const TunnelFrame &frame) {
     ClientSession *session = findSession(address, port);
     if (!session || !session->established) {
-        qDebug() << "⚠️ Получен пакет данных от клиента без активной сессии"
-                 << address.toString() << ":" << port;
+        logSuppressedPacketsWithoutSession(address, port);
         return false;
     }
 
@@ -260,6 +259,15 @@ void VpnServer::onSessionMaintenance() {
                  << "не-IPv4 пакетов из Linux TUN. MVP пока работает в режиме IPv4-only";
         m_suppressedTunNonIpv4Packets = 0;
         m_lastTunNonIpv4LogMs = now;
+    }
+
+    if (m_suppressedNoSessionPackets > 0 && now - m_lastNoSessionLogMs >= 5000) {
+        qDebug() << "ℹ️ За последние 5 секунд пропущено"
+                 << m_suppressedNoSessionPackets
+                 << "пакетов от клиента без активной сессии."
+                 << "Обычно это означает, что клиенту нужно заново пройти handshake";
+        m_suppressedNoSessionPackets = 0;
+        m_lastNoSessionLogMs = now;
     }
 
     for (auto it = m_sessions.begin(); it != m_sessions.end();) {
@@ -375,4 +383,18 @@ void VpnServer::logSuppressedTunNonIpv4() {
     }
 
     ++m_suppressedTunNonIpv4Packets;
+}
+
+void VpnServer::logSuppressedPacketsWithoutSession(const QHostAddress &address, quint16 port) {
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    if (m_lastNoSessionLogMs == 0 || now - m_lastNoSessionLogMs >= 5000) {
+        qDebug() << "⚠️ Клиент" << address.toString() << ":" << port
+                 << "отправляет данные без активной сессии."
+                 << "Сервер ждёт новый handshake";
+        m_lastNoSessionLogMs = now;
+        m_suppressedNoSessionPackets = 0;
+        return;
+    }
+
+    ++m_suppressedNoSessionPackets;
 }

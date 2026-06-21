@@ -51,6 +51,7 @@ private:
     ClientSession *activeSession();
     void logSuppressedClientNonIpv4();
     void logSuppressedTunNonIpv4();
+    void logSuppressedPacketsWithoutSession(const QHostAddress &address, quint16 port);
 
     QUdpSocket *m_socket;
     LinuxTunDevice *m_tunDevice;
@@ -58,8 +59,10 @@ private:
     QHash<QString, ClientSession> m_sessions;
     qint64 m_lastClientNonIpv4LogMs = 0;
     qint64 m_lastTunNonIpv4LogMs = 0;
+    qint64 m_lastNoSessionLogMs = 0;
     int m_suppressedClientNonIpv4Packets = 0;
     int m_suppressedTunNonIpv4Packets = 0;
+    int m_suppressedNoSessionPackets = 0;
 };
 
 #endif // VPNSERVER_H
