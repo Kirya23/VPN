@@ -14,6 +14,8 @@ VpnClient::VpnClient(QObject *parent)
 
     connect(m_tunnelClient, &TunnelClient::started, this, &VpnClient::onTunnelStarted);
     connect(m_tunnelClient, &TunnelClient::sessionEstablished, this, &VpnClient::onTunnelSessionEstablished);
+    connect(m_tunnelClient, &TunnelClient::connectionLost, this, &VpnClient::onTunnelConnectionLost);
+    connect(m_tunnelClient, &TunnelClient::connectionRestored, this, &VpnClient::onTunnelConnectionRestored);
     connect(m_tunnelClient, &TunnelClient::ipPacketReceived, this, &VpnClient::onTunnelPacketReceived);
     connect(m_tunnelClient, &TunnelClient::controlFrameReceived, this, &VpnClient::onControlFrameReceived);
     connect(m_tunnelClient, &TunnelClient::errorOccurred, this, &VpnClient::onTunnelError);
@@ -58,6 +60,14 @@ void VpnClient::onTunnelSessionEstablished() {
     }
 }
 
+void VpnClient::onTunnelConnectionLost() {
+    qDebug() << "❌ Связь с сервером потеряна";
+}
+
+void VpnClient::onTunnelConnectionRestored() {
+    qDebug() << "✅ Связь с сервером восстановлена";
+}
+
 void VpnClient::onTunReady() {
     qDebug() << "✅ TUN-адаптер готов!";
     qDebug() << "   Имя адаптера:" << m_tunAdapter->getAdapterName();
@@ -71,22 +81,22 @@ void VpnClient::onTunReady() {
     system(disableIPv6.toLocal8Bit().data());
     qDebug() << "   ✅ IPv6 отключён на TUN-адаптере";
 
-    QString setIpCmd = QString("netsh interface ip set address \"%1\" static 10.0.0.2 255.255.255.0")
+    QString setIpCmd = QString("netsh interface ip set address \"%1\" static 10.10.0.2 255.255.255.0")
                            .arg(adapterName);
     system(setIpCmd.toLocal8Bit().data());
-    qDebug() << "   ✅ IP-адрес 10.0.0.2 назначен";
+    qDebug() << "   ✅ IP-адрес 10.10.0.2 назначен";
 
     system("route delete 8.8.8.8 > nul 2>&1");
 
-    QString psCmd = QString("powershell -Command \"New-NetRoute -DestinationPrefix '8.8.8.8/32' -NextHop '10.0.0.1' -InterfaceAlias '%1' -RouteMetric 1\"")
+    QString psCmd = QString("powershell -Command \"New-NetRoute -DestinationPrefix '8.8.8.8/32' -NextHop '10.10.0.1' -InterfaceAlias '%1' -RouteMetric 1\"")
                         .arg(adapterName);
     const int result = system(psCmd.toLocal8Bit().data());
 
     if (result == 0) {
-        qDebug() << "   ✅ Маршрут для 8.8.8.8 -> 10.0.0.1 добавлен через" << adapterName;
+        qDebug() << "   ✅ Маршрут для 8.8.8.8 -> 10.10.0.1 добавлен через" << adapterName;
     } else {
         qDebug() << "   ⚠️ Команда PowerShell не сработала, пробуем route add с if 36...";
-        system("route add 8.8.8.8 mask 255.255.255.255 10.0.0.1 metric 1 if 36");
+        system("route add 8.8.8.8 mask 255.255.255.255 10.10.0.1 metric 1 if 36");
     }
 
     system("route print -4 | findstr \"8.8.8.8\"");

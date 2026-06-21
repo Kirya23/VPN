@@ -4,6 +4,7 @@
 #include <QHash>
 #include <QHostAddress>
 #include <QObject>
+#include <QTimer>
 #include <QUdpSocket>
 
 #include "handshakeprotocol.h"
@@ -33,12 +34,17 @@ private:
         QByteArray serverPrivateKey;
         QByteArray serverRandom;
         quint64 nextServerSequence = 1;
+        qint64 lastActivityMs = 0;
+        bool disconnectLogged = false;
     };
 
     QString peerKey(const QHostAddress &address, quint16 port) const;
     bool sendFrame(const QHostAddress &address, quint16 port, const TunnelFrame &frame);
     bool processClientHello(const QHostAddress &address, quint16 port, const TunnelFrame &frame);
     bool processEncryptedData(const QHostAddress &address, quint16 port, const TunnelFrame &frame);
+    void handleKeepalive(const QHostAddress &address, quint16 port, const TunnelFrame &frame);
+    void noteClientActivity(ClientSession *session);
+    void onSessionMaintenance();
     void onTunPacketReceived(const QByteArray &packet);
     void onTunError(const QString &error);
     ClientSession *findSession(const QHostAddress &address, quint16 port);
@@ -46,6 +52,7 @@ private:
 
     QUdpSocket *m_socket;
     LinuxTunDevice *m_tunDevice;
+    QTimer *m_sessionMaintenanceTimer;
     QHash<QString, ClientSession> m_sessions;
 };
 

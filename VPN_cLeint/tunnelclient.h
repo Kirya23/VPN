@@ -2,6 +2,7 @@
 #define TUNNELCLIENT_H
 
 #include <QAbstractSocket>
+#include <QTimer>
 #include <QObject>
 #include <QHostAddress>
 
@@ -34,6 +35,8 @@ signals:
     void started();
     void stopped();
     void sessionEstablished();
+    void connectionLost();
+    void connectionRestored();
     void ipPacketReceived(const QByteArray &packet);
     void controlFrameReceived(const TunnelFrame &frame);
     void errorOccurred(const QString &error);
@@ -41,11 +44,14 @@ signals:
 private slots:
     void onReadyRead();
     void onSocketError(QAbstractSocket::SocketError socketError);
+    void onKeepaliveTimer();
+    void onConnectionMonitorTimer();
 
 private:
     bool beginHandshake();
     bool finishHandshake(const TunnelFrame &frame);
     void configurePlatformSocketOptions();
+    void noteServerActivity();
     bool resolveServerAddress(const QString &serverAddress);
     bool sendFrame(const TunnelFrame &frame);
 
@@ -58,6 +64,10 @@ private:
     QByteArray m_clientPrivateKey;
     QByteArray m_clientRandom;
     TunnelSessionKeys m_sessionKeys;
+    QTimer *m_keepaliveTimer;
+    QTimer *m_connectionMonitorTimer;
+    qint64 m_lastServerActivityMs;
+    bool m_connectionAlive;
     bool m_udpResetNoticeShown;
     bool m_running;
     TunnelClientState m_state;

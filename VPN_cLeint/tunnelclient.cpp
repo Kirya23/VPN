@@ -1,6 +1,7 @@
 #include "tunnelclient.h"
 
 #include <QAbstractSocket>
+#include <QDateTime>
 #include <QDebug>
 #include <QHostInfo>
 #include <QUdpSocket>
@@ -20,12 +21,22 @@ TunnelClient::TunnelClient(QObject *parent)
     , m_serverPort(0)
     , m_sessionId(0)
     , m_nextSequence(1)
+    , m_keepaliveTimer(new QTimer(this))
+    , m_connectionMonitorTimer(new QTimer(this))
+    , m_lastServerActivityMs(0)
+    , m_connectionAlive(false)
     , m_udpResetNoticeShown(false)
     , m_running(false)
     , m_state(TunnelClientState::Stopped)
 {
     connect(m_socket, &QUdpSocket::readyRead, this, &TunnelClient::onReadyRead);
     connect(m_socket, &QUdpSocket::errorOccurred, this, &TunnelClient::onSocketError);
+
+    m_keepaliveTimer->setInterval(5000);
+    connect(m_keepaliveTimer, &QTimer::timeout, this, &TunnelClient::onKeepaliveTimer);
+
+    m_connectionMonitorTimer->setInterval(1000);
+    connect(m_connectionMonitorTimer, &QTimer::timeout, this, &TunnelClient::onConnectionMonitorTimer);
 }
 
 bool TunnelClient::start(const QString &serverAddress, quint16 serverPort) {
@@ -48,9 +59,12 @@ bool TunnelClient::start(const QString &serverAddress, quint16 serverPort) {
     m_serverPort = serverPort;
     m_sessionId = 0;
     m_nextSequence = 1;
+    m_lastServerActivityMs = QDateTime::currentMSecsSinceEpoch();
+    m_connectionAlive = false;
     m_udpResetNoticeShown = false;
     m_running = true;
     m_state = TunnelClientState::Handshake;
+    m_connectionMonitorTimer->start();
 
     if (!beginHandshake()) {
         stop();
@@ -76,6 +90,10 @@ void TunnelClient::stop() {
     m_clientPrivateKey.clear();
     m_clientRandom.clear();
     m_sessionKeys = TunnelSessionKeys();
+    m_keepaliveTimer->stop();
+    m_connectionMonitorTimer->stop();
+    m_lastServerActivityMs = 0;
+    m_connectionAlive = false;
     m_udpResetNoticeShown = false;
     m_socket->close();
     emit stopped();
@@ -148,6 +166,7 @@ void TunnelClient::onReadyRead() {
             continue;
         }
 
+        noteServerActivity();
         m_udpResetNoticeShown = false;
 
         if (frame.type == TunnelPacketType::Data) {
@@ -182,7 +201,10 @@ void TunnelClient::onReadyRead() {
                     continue;
                 }
             }
-            emit controlFrameReceived(frame);
+
+            if (frame.type != TunnelPacketType::Keepalive) {
+                emit controlFrameReceived(frame);
+            }
         }
     }
 }
@@ -224,6 +246,14 @@ void TunnelClient::configurePlatformSocketOptions() {
         qDebug() << "⚠️ Не удалось отключить UDP ConnReset в Windows, код:" << WSAGetLastError();
     }
 #endif
+}
+
+void TunnelClient::noteServerActivity() {
+    m_lastServerActivityMs = QDateTime::currentMSecsSinceEpoch();
+    if (!m_connectionAlive && m_state == TunnelClientState::Established) {
+        m_connectionAlive = true;
+        emit connectionRestored();
+    }
 }
 
 bool TunnelClient::resolveServerAddress(const QString &serverAddress) {
@@ -295,10 +325,32 @@ bool TunnelClient::finishHandshake(const TunnelFrame &frame) {
     m_sessionId = frame.sessionId;
     m_sessionKeys = derivedKeys;
     m_state = TunnelClientState::Established;
+    m_connectionAlive = true;
+    m_keepaliveTimer->start();
 
     qDebug() << "🔐 Handshake завершён, session id:" << m_sessionId;
     emit sessionEstablished();
     return true;
+}
+
+void TunnelClient::onKeepaliveTimer() {
+    if (!m_running || m_state != TunnelClientState::Established) {
+        return;
+    }
+
+    sendControlPacket(TunnelPacketType::Keepalive);
+}
+
+void TunnelClient::onConnectionMonitorTimer() {
+    if (!m_running || m_state != TunnelClientState::Established || !m_connectionAlive) {
+        return;
+    }
+
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    if (now - m_lastServerActivityMs > 15000) {
+        m_connectionAlive = false;
+        emit connectionLost();
+    }
 }
 
 bool TunnelClient::sendFrame(const TunnelFrame &frame) {

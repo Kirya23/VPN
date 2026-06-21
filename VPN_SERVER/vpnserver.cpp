@@ -1,5 +1,6 @@
 #include "vpnserver.h"
 
+#include <QDateTime>
 #include <QDebug>
 #include <QtEndian>
 
@@ -7,10 +8,13 @@ VpnServer::VpnServer(QObject *parent)
     : QObject(parent)
     , m_socket(new QUdpSocket(this))
     , m_tunDevice(new LinuxTunDevice(this))
+    , m_sessionMaintenanceTimer(new QTimer(this))
 {
     connect(m_socket, &QUdpSocket::readyRead, this, &VpnServer::onReadyRead);
     connect(m_tunDevice, &LinuxTunDevice::packetReceived, this, &VpnServer::onTunPacketReceived);
     connect(m_tunDevice, &LinuxTunDevice::errorOccurred, this, &VpnServer::onTunError);
+    m_sessionMaintenanceTimer->setInterval(1000);
+    connect(m_sessionMaintenanceTimer, &QTimer::timeout, this, &VpnServer::onSessionMaintenance);
 }
 
 bool VpnServer::start(quint16 port) {
@@ -28,6 +32,7 @@ bool VpnServer::start(quint16 port) {
         qDebug() << "ℹ️ Linux TUN backend пока недоступен в этой сборке или окружении";
     }
 
+    m_sessionMaintenanceTimer->start();
     return true;
 }
 
@@ -53,6 +58,11 @@ void VpnServer::onReadyRead() {
 
         if (frame.type == TunnelPacketType::ClientHello) {
             processClientHello(senderAddress, senderPort, frame);
+            continue;
+        }
+
+        if (frame.type == TunnelPacketType::Keepalive) {
+            handleKeepalive(senderAddress, senderPort, frame);
             continue;
         }
 
@@ -128,6 +138,7 @@ bool VpnServer::processClientHello(const QHostAddress &address, quint16 port, co
     }
 
     session.established = true;
+    session.lastActivityMs = QDateTime::currentMSecsSinceEpoch();
     m_sessions.insert(peerKey(address, port), session);
 
     ServerHelloPayload serverHello;
@@ -183,6 +194,8 @@ bool VpnServer::processEncryptedData(const QHostAddress &address, quint16 port, 
         return false;
     }
 
+    noteClientActivity(session);
+
     quint8 ipVersion = 0;
     if (!plaintext.isEmpty()) {
         ipVersion = (static_cast<quint8>(plaintext[0]) >> 4) & 0x0F;
@@ -209,6 +222,49 @@ bool VpnServer::processEncryptedData(const QHostAddress &address, quint16 port, 
     qDebug() << "   → IPv4-пакет передан в Linux TUN";
 
     return true;
+}
+
+void VpnServer::handleKeepalive(const QHostAddress &address, quint16 port, const TunnelFrame &frame) {
+    Q_UNUSED(frame);
+    ClientSession *session = findSession(address, port);
+    if (!session || !session->established) {
+        return;
+    }
+
+    noteClientActivity(session);
+}
+
+void VpnServer::noteClientActivity(ClientSession *session) {
+    if (!session) {
+        return;
+    }
+
+    session->lastActivityMs = QDateTime::currentMSecsSinceEpoch();
+    session->disconnectLogged = false;
+}
+
+void VpnServer::onSessionMaintenance() {
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+
+    for (auto it = m_sessions.begin(); it != m_sessions.end();) {
+        ClientSession &session = it.value();
+
+        if (session.established) {
+            if (now - session.lastActivityMs > 15000) {
+                qDebug() << "📴 Клиент" << session.address.toString() << ":" << session.port << "отключён";
+                it = m_sessions.erase(it);
+                continue;
+            }
+
+            TunnelFrame keepalive;
+            keepalive.type = TunnelPacketType::Keepalive;
+            keepalive.sessionId = session.sessionId;
+            keepalive.sequence = session.nextServerSequence++;
+            sendFrame(session.address, session.port, keepalive);
+        }
+
+        ++it;
+    }
 }
 
 void VpnServer::onTunPacketReceived(const QByteArray &packet) {

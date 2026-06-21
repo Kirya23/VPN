@@ -18,6 +18,8 @@ private slots:
     void cleanup();
     void onTunnelStarted();
     void onTunnelSessionEstablished();
+    void onTunnelConnectionLost();
+    void onTunnelConnectionRestored();
     void onTunReady();
     void onTunPacketReceived(const QByteArray &packet);
     void onTunnelPacketReceived(const QByteArray &packet);

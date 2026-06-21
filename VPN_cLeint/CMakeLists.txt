@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.19)
 project(VPN_client LANGUAGES CXX)  # Исправлено имя проекта
 
-find_package(Qt6 6.5 REQUIRED COMPONENTS Core Network)
+find_package(Qt6 6.4 REQUIRED COMPONENTS Core Network)
 find_package(OpenSSL REQUIRED)
 
 qt_standard_project_setup()
