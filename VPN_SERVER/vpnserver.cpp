@@ -202,7 +202,7 @@ bool VpnServer::processEncryptedData(const QHostAddress &address, quint16 port, 
     }
 
     if (ipVersion != 4) {
-        qDebug() << "ℹ️ IPv6 или неизвестный IP-пакет временно пропущен. Текущий MVP сфокусирован на IPv4-only";
+        logSuppressedClientNonIpv4();
         return false;
     }
 
@@ -246,6 +246,22 @@ void VpnServer::noteClientActivity(ClientSession *session) {
 void VpnServer::onSessionMaintenance() {
     const qint64 now = QDateTime::currentMSecsSinceEpoch();
 
+    if (m_suppressedClientNonIpv4Packets > 0 && now - m_lastClientNonIpv4LogMs >= 5000) {
+        qDebug() << "ℹ️ За последние 5 секунд пропущено"
+                 << m_suppressedClientNonIpv4Packets
+                 << "не-IPv4 пакетов от клиента. MVP пока работает в режиме IPv4-only";
+        m_suppressedClientNonIpv4Packets = 0;
+        m_lastClientNonIpv4LogMs = now;
+    }
+
+    if (m_suppressedTunNonIpv4Packets > 0 && now - m_lastTunNonIpv4LogMs >= 5000) {
+        qDebug() << "ℹ️ За последние 5 секунд пропущено"
+                 << m_suppressedTunNonIpv4Packets
+                 << "не-IPv4 пакетов из Linux TUN. MVP пока работает в режиме IPv4-only";
+        m_suppressedTunNonIpv4Packets = 0;
+        m_lastTunNonIpv4LogMs = now;
+    }
+
     for (auto it = m_sessions.begin(); it != m_sessions.end();) {
         ClientSession &session = it.value();
 
@@ -274,7 +290,7 @@ void VpnServer::onTunPacketReceived(const QByteArray &packet) {
 
     const quint8 ipVersion = (static_cast<quint8>(packet[0]) >> 4) & 0x0F;
     if (ipVersion != 4) {
-        qDebug() << "ℹ️ Пакет из Linux TUN не является IPv4, временно пропускаем";
+        logSuppressedTunNonIpv4();
         return;
     }
 
@@ -333,4 +349,30 @@ VpnServer::ClientSession *VpnServer::activeSession() {
         }
     }
     return nullptr;
+}
+
+void VpnServer::logSuppressedClientNonIpv4() {
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    if (m_lastClientNonIpv4LogMs == 0 || now - m_lastClientNonIpv4LogMs >= 5000) {
+        qDebug() << "ℹ️ Клиент отправляет IPv6 или другой не-IPv4 трафик."
+                 << "MVP пока обрабатывает только IPv4, поэтому такие пакеты пропускаются";
+        m_lastClientNonIpv4LogMs = now;
+        m_suppressedClientNonIpv4Packets = 0;
+        return;
+    }
+
+    ++m_suppressedClientNonIpv4Packets;
+}
+
+void VpnServer::logSuppressedTunNonIpv4() {
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    if (m_lastTunNonIpv4LogMs == 0 || now - m_lastTunNonIpv4LogMs >= 5000) {
+        qDebug() << "ℹ️ Linux TUN выдаёт IPv6 или другой не-IPv4 трафик."
+                 << "MVP пока обрабатывает только IPv4, поэтому такие пакеты пропускаются";
+        m_lastTunNonIpv4LogMs = now;
+        m_suppressedTunNonIpv4Packets = 0;
+        return;
+    }
+
+    ++m_suppressedTunNonIpv4Packets;
 }
