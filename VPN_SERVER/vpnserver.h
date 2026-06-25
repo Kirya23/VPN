@@ -44,10 +44,12 @@ private:
     bool processEncryptedData(const QHostAddress &address, quint16 port, const TunnelFrame &frame);
     void handleKeepalive(const QHostAddress &address, quint16 port, const TunnelFrame &frame);
     void noteClientActivity(ClientSession *session);
+    void rememberActiveSession(const QHostAddress &address, quint16 port);
     void onSessionMaintenance();
     void onTunPacketReceived(const QByteArray &packet);
     void onTunError(const QString &error);
     ClientSession *findSession(const QHostAddress &address, quint16 port);
+    ClientSession *currentSession();
     ClientSession *activeSession();
     void logSuppressedClientNonIpv4();
     void logSuppressedTunNonIpv4();
@@ -60,6 +62,7 @@ private:
     qint64 m_lastClientNonIpv4LogMs = 0;
     qint64 m_lastTunNonIpv4LogMs = 0;
     qint64 m_lastNoSessionLogMs = 0;
+    QString m_currentSessionKey;
     int m_suppressedClientNonIpv4Packets = 0;
     int m_suppressedTunNonIpv4Packets = 0;
     int m_suppressedNoSessionPackets = 0;

@@ -144,6 +144,7 @@ bool VpnServer::processClientHello(const QHostAddress &address, quint16 port, co
     session.established = true;
     session.lastActivityMs = QDateTime::currentMSecsSinceEpoch();
     m_sessions.insert(peerKey(address, port), session);
+    rememberActiveSession(address, port);
 
     ServerHelloPayload serverHello;
     serverHello.publicKey = session.serverPublicKey;
@@ -198,6 +199,7 @@ bool VpnServer::processEncryptedData(const QHostAddress &address, quint16 port, 
     }
 
     noteClientActivity(session);
+    rememberActiveSession(address, port);
 
     quint8 ipVersion = 0;
     if (!plaintext.isEmpty()) {
@@ -235,6 +237,7 @@ void VpnServer::handleKeepalive(const QHostAddress &address, quint16 port, const
     }
 
     noteClientActivity(session);
+    rememberActiveSession(address, port);
 }
 
 void VpnServer::noteClientActivity(ClientSession *session) {
@@ -244,6 +247,10 @@ void VpnServer::noteClientActivity(ClientSession *session) {
 
     session->lastActivityMs = QDateTime::currentMSecsSinceEpoch();
     session->disconnectLogged = false;
+}
+
+void VpnServer::rememberActiveSession(const QHostAddress &address, quint16 port) {
+    m_currentSessionKey = peerKey(address, port);
 }
 
 void VpnServer::onSessionMaintenance() {
@@ -280,6 +287,9 @@ void VpnServer::onSessionMaintenance() {
         if (session.established) {
             if (now - session.lastActivityMs > kClientSessionIdleTimeoutMs) {
                 qDebug() << "📴 Клиент" << session.address.toString() << ":" << session.port << "отключён";
+                if (m_currentSessionKey == it.key()) {
+                    m_currentSessionKey.clear();
+                }
                 it = m_sessions.erase(it);
                 continue;
             }
@@ -306,7 +316,7 @@ void VpnServer::onTunPacketReceived(const QByteArray &packet) {
         return;
     }
 
-    ClientSession *session = activeSession();
+    ClientSession *session = currentSession();
     if (!session) {
         qDebug() << "⚠️ Нет активной клиентской сессии для отправки пакета из Linux TUN";
         return;
@@ -361,6 +371,17 @@ VpnServer::ClientSession *VpnServer::activeSession() {
         }
     }
     return nullptr;
+}
+
+VpnServer::ClientSession *VpnServer::currentSession() {
+    if (!m_currentSessionKey.isEmpty()) {
+        auto it = m_sessions.find(m_currentSessionKey);
+        if (it != m_sessions.end() && it->established) {
+            return &it.value();
+        }
+    }
+
+    return activeSession();
 }
 
 void VpnServer::logSuppressedClientNonIpv4() {
