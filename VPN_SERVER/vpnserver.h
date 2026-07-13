@@ -16,7 +16,9 @@ class VpnServer : public QObject {
     Q_OBJECT
 public:
     explicit VpnServer(QObject *parent = nullptr);
-    bool start(quint16 port);
+    bool start(quint16 port,
+               const QString &tunName = QStringLiteral("qvpn0"),
+               const QString &tunAddress = QStringLiteral("10.10.0.1/24"));
 
 private slots:
     void onReadyRead();

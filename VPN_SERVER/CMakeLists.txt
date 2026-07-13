@@ -1,6 +1,12 @@
 cmake_minimum_required(VERSION 3.19)
 project(VPN_server LANGUAGES CXX)
 
+if(MSVC)
+    add_compile_options(/utf-8)
+else()
+    add_compile_options(-finput-charset=UTF-8 -fexec-charset=UTF-8)
+endif()
+
 find_package(Qt6 6.4 REQUIRED COMPONENTS Core Network)
 find_package(OpenSSL REQUIRED)
 
