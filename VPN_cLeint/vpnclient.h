@@ -39,6 +39,7 @@ private:
 
     struct WindowsDnsBackup {
         QString interfaceAlias;
+        int interfaceIndex = 0;
         int addressFamily = 0;
         QStringList serverAddresses;
         bool hadCustomServers = false;

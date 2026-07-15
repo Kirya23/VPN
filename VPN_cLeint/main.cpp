@@ -8,7 +8,7 @@
 static QCoreApplication* globalApp = nullptr;
 
 void signalHandler(int signal) {
-    qDebug() << "\n🛑 Получен сигнал" << signal << "- завершаем работу...";
+    qDebug() << "\n[STOP] Получен сигнал" << signal << "- завершаем работу...";
     if (globalApp) {
         globalApp->quit();
     }
@@ -22,11 +22,11 @@ int main(int argc, char *argv[]) {
     signal(SIGINT, signalHandler);
     signal(SIGTERM, signalHandler);
 
-    qDebug() << "🛡️ VPN-клиент с Wintun";
+    qDebug() << "[INFO] VPN-клиент с Wintun";
     qDebug() << "=========================";
 
     VpnClient client;
-    client.start("95.140.147.246", 8080);
+    client.start("147.45.173.166", 8080);
 
     return a.exec();
 }

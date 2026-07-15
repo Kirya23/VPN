@@ -76,8 +76,8 @@ bool TunnelClient::start(const QString &serverAddress, quint16 serverPort) {
         return false;
     }
 
-    qDebug() << "✅ Туннельный транспорт по UDP готов ->" << m_serverAddress.toString() << ":" << m_serverPort;
-    qDebug() << "⏳ Ожидаем завершения handshake с сервером...";
+    qDebug() << "[OK] Туннельный транспорт по UDP готов ->" << m_serverAddress.toString() << ":" << m_serverPort;
+    qDebug() << "[WAIT] Ожидаем завершения handshake с сервером...";
     emit started();
     return true;
 }
@@ -160,7 +160,7 @@ void TunnelClient::onReadyRead() {
         }
 
         if (senderAddress != m_serverAddress || senderPort != m_serverPort) {
-            qDebug() << "⚠️ Игнорируем датаграмму от неожиданного узла" << senderAddress.toString() << ":" << senderPort;
+            qDebug() << "[WARN] Игнорируем датаграмму от неожиданного узла" << senderAddress.toString() << ":" << senderPort;
             continue;
         }
 
@@ -218,7 +218,7 @@ void TunnelClient::onSocketError(QAbstractSocket::SocketError socketError) {
 #ifdef Q_OS_WIN
     if (socketError == QAbstractSocket::ConnectionRefusedError) {
         if (!m_udpResetNoticeShown) {
-            qDebug() << "ℹ️ UDP-сервер пока не отвечает на" << m_serverAddress.toString() << ":" << m_serverPort;
+            qDebug() << "[INFO] UDP-сервер пока не отвечает на" << m_serverAddress.toString() << ":" << m_serverPort;
             m_udpResetNoticeShown = true;
         }
         return;
@@ -232,7 +232,7 @@ void TunnelClient::configurePlatformSocketOptions() {
 #ifdef Q_OS_WIN
     const SOCKET nativeSocket = static_cast<SOCKET>(m_socket->socketDescriptor());
     if (nativeSocket == INVALID_SOCKET) {
-        qDebug() << "⚠️ Не удалось получить нативный дескриптор UDP-сокета для настройки Windows";
+        qDebug() << "[WARN] Не удалось получить нативный дескриптор UDP-сокета для настройки Windows";
         return;
     }
 
@@ -248,7 +248,7 @@ void TunnelClient::configurePlatformSocketOptions() {
                                 nullptr,
                                 nullptr);
     if (result != 0) {
-        qDebug() << "⚠️ Не удалось отключить UDP ConnReset в Windows, код:" << WSAGetLastError();
+        qDebug() << "[WARN] Не удалось отключить UDP ConnReset в Windows, код:" << WSAGetLastError();
     }
 #endif
 }
@@ -333,7 +333,7 @@ bool TunnelClient::finishHandshake(const TunnelFrame &frame) {
     m_connectionAlive = true;
     m_keepaliveTimer->start();
 
-    qDebug() << "🔐 Handshake завершён, session id:" << m_sessionId;
+    qDebug() << "[OK] Handshake завершён, session id:" << m_sessionId;
     emit sessionEstablished();
     return true;
 }

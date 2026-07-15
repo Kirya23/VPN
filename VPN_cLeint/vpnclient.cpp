@@ -6,6 +6,7 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QProcess>
+#include <QRegularExpression>
 #include <QThread>
 
 #ifdef Q_OS_WIN
@@ -18,6 +19,18 @@ constexpr auto kTunnelSecondaryDns = "8.8.8.8";
 
 QString qstr(const char *value) {
     return QString::fromLatin1(value);
+}
+
+QString adapterDisplayName(const QString &alias, int index) {
+    if (!alias.trimmed().isEmpty()) {
+        return QStringLiteral("\"%1\"").arg(alias);
+    }
+
+    if (index > 0) {
+        return QStringLiteral("#%1").arg(index);
+    }
+
+    return QStringLiteral("<unknown>");
 }
 }
 #endif
@@ -59,7 +72,7 @@ bool VpnClient::start(const QString &serverAddress, quint16 port) {
 }
 
 void VpnClient::cleanup() {
-    qDebug() << "🧹 Очищаем маршруты...";
+    qDebug() << "[CLEAN] Очищаем маршруты...";
 
 #ifdef Q_OS_WIN
     cleanupWindowsRoutes();
@@ -73,15 +86,15 @@ void VpnClient::cleanup() {
 }
 
 void VpnClient::onTunnelStarted() {
-    qDebug() << "✅ Туннельный транспорт запущен";
-    qDebug() << "⏳ Ждём подтверждения сессии от сервера перед запуском TUN-адаптера";
+    qDebug() << "[OK] Туннельный транспорт запущен";
+    qDebug() << "[WAIT] Ждём подтверждения сессии от сервера перед запуском TUN-адаптера";
 }
 
 void VpnClient::onTunnelSessionEstablished() {
     m_reconnectTimer->stop();
     m_reconnectInProgress = false;
     m_tunForwardingEnabled = false;
-    qDebug() << "✅ Туннельная сессия установлена";
+    qDebug() << "[OK] Туннельная сессия установлена";
 
     if (!m_tunAdapter->initialize("MyVPN")) {
         qDebug() << "Не удалось инициализировать TUN-адаптер";
@@ -95,7 +108,7 @@ void VpnClient::onTunnelSessionEstablished() {
 }
 
 void VpnClient::onTunnelConnectionLost() {
-    qDebug() << "❌ Связь с сервером потеряна";
+    qDebug() << "[ERR] Связь с сервером потеряна";
 
     if (m_reconnectInProgress) {
         return;
@@ -110,12 +123,12 @@ void VpnClient::onTunnelConnectionLost() {
     m_tunAdapter->stop();
     m_tunnelClient->stop();
 
-    qDebug() << "⏳ Пытаемся заново установить туннельную сессию...";
+    qDebug() << "[WAIT] Пытаемся заново установить туннельную сессию...";
     m_reconnectTimer->start();
 }
 
 void VpnClient::onTunnelConnectionRestored() {
-    qDebug() << "✅ Связь с сервером восстановлена";
+    qDebug() << "[OK] Связь с сервером восстановлена";
 }
 
 void VpnClient::onReconnectTimer() {
@@ -124,15 +137,15 @@ void VpnClient::onReconnectTimer() {
         return;
     }
 
-    qDebug() << "🔄 Повторное подключение к VPN-серверу" << m_serverAddress << ":" << m_serverPort;
+    qDebug() << "[RETRY] Повторное подключение к VPN-серверу" << m_serverAddress << ":" << m_serverPort;
     if (!m_tunnelClient->start(m_serverAddress, m_serverPort)) {
-        qDebug() << "⚠️ Повторное подключение не удалось, повторим ещё раз через 2 секунды";
+        qDebug() << "[WARN] Повторное подключение не удалось, повторим ещё раз через 2 секунды";
         m_reconnectTimer->start();
     }
 }
 
 void VpnClient::onTunReady() {
-    qDebug() << "✅ TUN-адаптер готов!";
+    qDebug() << "[OK] TUN-адаптер готов!";
     qDebug() << "   Имя адаптера:" << m_tunAdapter->getAdapterName();
 
 #ifdef Q_OS_WIN
@@ -140,12 +153,12 @@ void VpnClient::onTunReady() {
 
     const QString adapterName = m_tunAdapter->getAdapterName();
     if (!configureWindowsNetwork(adapterName)) {
-        qDebug() << "   ⚠️ Клиентский TUN поднят, но часть сетевой настройки не применена";
+        qDebug() << "   [WARN] Клиентский TUN поднят, но часть сетевой настройки не применена";
         return;
     }
 
     m_tunForwardingEnabled = true;
-    qDebug() << "   → Клиентская сторона VPN-туннеля готова";
+    qDebug() << "   [OK] Клиентская сторона VPN-туннеля готова";
 #endif
 }
 
@@ -159,34 +172,34 @@ void VpnClient::onTunPacketReceived(const QByteArray &packet) {
     }
 
     if (!m_tunnelClient->sendIpPacket(packet)) {
-        qDebug() << "⚠️ Не удалось передать пакет из TUN в туннельный транспорт";
+        qDebug() << "[WARN] Не удалось передать пакет из TUN в туннельный транспорт";
         return;
     }
 
-    qDebug() << "📥 Пакет из TUN передан в туннель (размер:" << packet.size() << "байт)";
+    qDebug() << "[DATA] Пакет из TUN передан в туннель (размер:" << packet.size() << "байт)";
 }
 
 void VpnClient::onTunnelPacketReceived(const QByteArray &packet) {
-    qDebug() << "📥 IP-пакет получен из туннеля (размер:" << packet.size() << "байт)";
+    qDebug() << "[DATA] IP-пакет получен из туннеля (размер:" << packet.size() << "байт)";
 
     if (m_tunAdapter->isRunning() && m_tunAdapter->sendPacket(packet)) {
-        qDebug() << "   → Пакет передан в TUN-адаптер";
+        qDebug() << "   [OK] Пакет передан в TUN-адаптер";
     } else if (m_tunAdapter->isRunning()) {
-        qDebug() << "⚠️ Не удалось передать пакет из туннеля в TUN-адаптер";
+        qDebug() << "[WARN] Не удалось передать пакет из туннеля в TUN-адаптер";
     }
 }
 
 void VpnClient::onControlFrameReceived(const TunnelFrame &frame) {
-    qDebug() << "ℹ️ Получен управляющий кадр от сервера. Тип:" << static_cast<int>(frame.type)
+    qDebug() << "[INFO] Получен управляющий кадр от сервера. Тип:" << static_cast<int>(frame.type)
              << "Последовательность:" << frame.sequence << "Размер полезной нагрузки:" << frame.payload.size();
 }
 
 void VpnClient::onTunError(const QString &error) {
-    qDebug() << "❌ Ошибка TUN-адаптера:" << error;
+    qDebug() << "[ERR] Ошибка TUN-адаптера:" << error;
 }
 
 void VpnClient::onTunnelError(const QString &error) {
-    qDebug() << "❌ Ошибка туннельного транспорта:" << error;
+    qDebug() << "[ERR] Ошибка туннельного транспорта:" << error;
 }
 
 #ifdef Q_OS_WIN
@@ -196,9 +209,9 @@ bool VpnClient::configureWindowsNetwork(const QString &adapterName) {
                                                                 QStringLiteral("set"), QStringLiteral("interface"),
                                                                 adapterName, QStringLiteral("disabled")});
     if (disableIpv6Result == 0) {
-        qDebug() << "   ✅ IPv6 отключён на TUN-адаптере";
+        qDebug() << "   [OK] IPv6 отключён на TUN-адаптере";
     } else {
-        qDebug() << "   ⚠️ Не удалось отключить IPv6 на TUN-адаптере";
+        qDebug() << "   [WARN] Не удалось отключить IPv6 на TUN-адаптере";
     }
 
     const int setIpResult = QProcess::execute(QStringLiteral("netsh"),
@@ -208,10 +221,10 @@ bool VpnClient::configureWindowsNetwork(const QString &adapterName) {
                                                           qstr(kTunnelClientAddress),
                                                           qstr(kTunnelClientMask)});
     if (setIpResult != 0) {
-        qDebug() << "   ❌ Не удалось назначить IP-адрес" << kTunnelClientAddress << "на TUN-адаптер";
+        qDebug() << "   [ERR] Не удалось назначить IP-адрес" << kTunnelClientAddress << "на TUN-адаптер";
         return false;
     }
-    qDebug() << "   ✅ IP-адрес" << kTunnelClientAddress << "назначен";
+    qDebug() << "   [OK] IP-адрес" << kTunnelClientAddress << "назначен";
 
     configureWindowsDns(adapterName);
 
@@ -219,7 +232,7 @@ bool VpnClient::configureWindowsNetwork(const QString &adapterName) {
         return true;
     }
 
-    qDebug() << "   ⚠️ Безопасный full-tunnel пока не применён, откатываемся к тестовому маршруту 8.8.8.8";
+    qDebug() << "   [WARN] Безопасный full-tunnel пока не применён, откатываемся к тестовому маршруту 8.8.8.8";
     return installLegacyTestRoute(adapterName);
 }
 
@@ -227,18 +240,18 @@ bool VpnClient::configureWindowsRoutes(const QString &adapterName) {
     cleanupWindowsRoutes();
 
     if (!installServerBypassRoute()) {
-        qDebug() << "   ❌ Не удалось создать обходной маршрут до VPS. Без него full-tunnel небезопасен";
+        qDebug() << "   [ERR] Не удалось создать обходной маршрут до VPS. Без него full-tunnel небезопасен";
         return false;
     }
 
     if (!installFullTunnelRoutes(adapterName)) {
-        qDebug() << "   ❌ Не удалось включить full-tunnel маршруты через TUN";
+        qDebug() << "   [ERR] Не удалось включить full-tunnel маршруты через TUN";
         return false;
     }
 
     m_fullTunnelEnabled = true;
-    qDebug() << "   ✅ Весь IPv4-трафик клиента теперь направляется в VPN";
-    qDebug() << "   ✅ Отдельный обходной маршрут до VPN-сервера сохранён, чтобы туннель не потерял связь";
+    qDebug() << "   [OK] Весь IPv4-трафик клиента теперь направляется в VPN";
+    qDebug() << "   [OK] Отдельный обходной маршрут до VPN-сервера сохранён, чтобы туннель не потерял связь";
 
     return true;
 }
@@ -252,23 +265,23 @@ bool VpnClient::configureWindowsDns(const QString &adapterName) {
                                     qstr(kTunnelSecondaryDns));
     const bool success = runPowerShell(script);
     if (success) {
-        qDebug() << "   ✅ DNS для VPN-адаптера настроен:" << kTunnelPrimaryDns << "и" << kTunnelSecondaryDns;
+        qDebug() << "   [OK] DNS для VPN-адаптера настроен:" << kTunnelPrimaryDns << "и" << kTunnelSecondaryDns;
     } else {
-        qDebug() << "   ⚠️ Не удалось задать DNS на VPN-адаптере. По IP всё ещё можно тестировать";
+        qDebug() << "   [WARN] Не удалось задать DNS на VPN-адаптере. По IP всё ещё можно тестировать";
     }
 
     const bool nonVpnOverride = overrideNonVpnAdapterDns(adapterName);
     if (nonVpnOverride) {
-        qDebug() << "   ✅ DNS на активных не-VPN адаптерах временно выровнен, чтобы уменьшить DNS-утечки";
+        qDebug() << "   [OK] DNS на активных не-VPN адаптерах временно выровнен, чтобы уменьшить DNS-утечки";
     } else {
-        qDebug() << "   ⚠️ Не удалось полностью переопределить DNS на остальных адаптерах. Возможны остаточные DNS-утечки";
+        qDebug() << "   [WARN] Не удалось полностью переопределить DNS на остальных адаптерах. Возможны остаточные DNS-утечки";
     }
 
     const int flushResult = QProcess::execute(QStringLiteral("ipconfig"), QStringList{QStringLiteral("/flushdns")});
     if (flushResult == 0) {
-        qDebug() << "   ✅ Кэш DNS очищен";
+        qDebug() << "   [OK] Кэш DNS очищен";
     } else {
-        qDebug() << "   ⚠️ Не удалось очистить кэш DNS";
+        qDebug() << "   [WARN] Не удалось очистить кэш DNS";
     }
 
     return success && nonVpnOverride;
@@ -286,23 +299,25 @@ bool VpnClient::overrideNonVpnAdapterDns(const QString &vpnAdapterName) {
         QString script;
         if (backup.addressFamily == 2) {
             script = QStringLiteral(
-                         "Set-DnsClientServerAddress -InterfaceAlias '%1' "
+                         "Set-DnsClientServerAddress -InterfaceIndex %1 "
                          "-ServerAddresses @('%2','%3')")
-                         .arg(backup.interfaceAlias,
+                         .arg(backup.interfaceIndex)
+                         .arg(
                               qstr(kTunnelPrimaryDns),
                               qstr(kTunnelSecondaryDns));
         } else if (backup.addressFamily == 23) {
             script = QStringLiteral(
-                         "Set-DnsClientServerAddress -InterfaceAlias '%1' "
+                         "Set-DnsClientServerAddress -InterfaceIndex %1 "
                          "-ServerAddresses @('2606:4700:4700::1111','2606:4700:4700::1001')")
-                         .arg(backup.interfaceAlias);
+                         .arg(backup.interfaceIndex);
         } else {
             continue;
         }
 
         if (!runPowerShell(script)) {
             allSucceeded = false;
-            qDebug() << "   ⚠️ Не удалось временно переопределить DNS на адаптере" << backup.interfaceAlias
+            qDebug() << "   [WARN] Не удалось временно переопределить DNS на адаптере"
+                     << adapterDisplayName(backup.interfaceAlias, backup.interfaceIndex)
                      << "для семейства адресов" << backup.addressFamily;
         }
     }
@@ -325,16 +340,18 @@ void VpnClient::restoreNonVpnAdapterDns() {
             }
 
             script = QStringLiteral(
-                         "Set-DnsClientServerAddress -InterfaceAlias '%1' -ServerAddresses @(%2)")
-                         .arg(backup.interfaceAlias, escapedAddresses.join(QStringLiteral(",")));
+                         "Set-DnsClientServerAddress -InterfaceIndex %1 -ServerAddresses @(%2)")
+                         .arg(backup.interfaceIndex)
+                         .arg(escapedAddresses.join(QStringLiteral(",")));
         } else {
             script = QStringLiteral(
-                         "Set-DnsClientServerAddress -InterfaceAlias '%1' -ResetServerAddresses")
-                         .arg(backup.interfaceAlias);
+                         "Set-DnsClientServerAddress -InterfaceIndex %1 -ResetServerAddresses")
+                         .arg(backup.interfaceIndex);
         }
 
         if (!runPowerShell(script)) {
-            qDebug() << "   ⚠️ Не удалось восстановить исходный DNS на адаптере" << backup.interfaceAlias;
+            qDebug() << "   [WARN] Не удалось восстановить исходный DNS на адаптере"
+                     << adapterDisplayName(backup.interfaceAlias, backup.interfaceIndex);
         }
     }
 
@@ -344,13 +361,13 @@ void VpnClient::restoreNonVpnAdapterDns() {
 bool VpnClient::installServerBypassRoute() {
     const QString serverIp = normalizedServerAddress();
     if (serverIp.isEmpty()) {
-        qDebug() << "   ❌ Адрес VPN-сервера не является IPv4-адресом. Для текущего MVP нужен прямой IPv4";
+        qDebug() << "   [ERR] Адрес VPN-сервера не является IPv4-адресом. Для текущего MVP нужен прямой IPv4";
         return false;
     }
 
     const WindowsRouteInfo currentRoute = queryCurrentRouteToServer();
     if (!currentRoute.isValid()) {
-        qDebug() << "   ❌ Не удалось определить текущий системный маршрут до VPN-сервера" << serverIp;
+        qDebug() << "   [ERR] Не удалось определить текущий системный маршрут до VPN-сервера" << serverIp;
         return false;
     }
 
@@ -370,7 +387,7 @@ bool VpnClient::installServerBypassRoute() {
     }
 
     m_serverBypassInstalled = true;
-    qDebug() << "   ✅ Обходной маршрут до VPN-сервера" << serverIp
+    qDebug() << "   [OK] Обходной маршрут до VPN-сервера" << serverIp
              << "оставлен через исходный шлюз" << currentRoute.nextHop;
     return true;
 }
@@ -408,12 +425,12 @@ bool VpnClient::installLegacyTestRoute(const QString &adapterName) {
                                   "-InterfaceAlias '%2' -RouteMetric 1")
                                   .arg(qstr(kTunnelServerAddress), adapterName);
     if (!runPowerShell(addScript)) {
-        qDebug() << "   ❌ Даже тестовый маршрут 8.8.8.8 через VPN не удалось добавить";
+        qDebug() << "   [ERR] Даже тестовый маршрут 8.8.8.8 через VPN не удалось добавить";
         return false;
     }
 
     m_legacyTestRouteEnabled = true;
-    qDebug() << "   ✅ Маршрут для 8.8.8.8 ->" << kTunnelServerAddress << "добавлен через" << adapterName;
+    qDebug() << "   [OK] Маршрут для 8.8.8.8 ->" << kTunnelServerAddress << "добавлен через" << adapterName;
     return true;
 }
 
@@ -439,13 +456,13 @@ void VpnClient::cleanupWindowsRoutes() {
     }
 
     if (m_fullTunnelEnabled) {
-        qDebug() << "   → Full-tunnel маршруты удалены";
+        qDebug() << "   [CLEAN] Full-tunnel маршруты удалены";
     }
     if (m_serverBypassInstalled) {
-        qDebug() << "   → Обходной маршрут до VPN-сервера удалён";
+        qDebug() << "   [CLEAN] Обходной маршрут до VPN-сервера удалён";
     }
     if (m_legacyTestRouteEnabled) {
-        qDebug() << "   → Тестовый маршрут 8.8.8.8 удалён";
+        qDebug() << "   [CLEAN] Тестовый маршрут 8.8.8.8 удалён";
     }
 
     m_fullTunnelEnabled = false;
@@ -461,18 +478,22 @@ bool VpnClient::runPowerShell(const QString &script, QString *standardOutput) co
                               QStringLiteral("-Command"), script});
 
     if (!process.waitForFinished(15000)) {
-        qDebug() << "   ❌ PowerShell-команда не завершилась вовремя:" << script;
+        qDebug() << "   [ERR] PowerShell-команда не завершилась вовремя";
         return false;
     }
 
     if (standardOutput) {
-        *standardOutput = QString::fromUtf8(process.readAllStandardOutput()).trimmed();
+        *standardOutput = QString::fromLocal8Bit(process.readAllStandardOutput()).trimmed();
     }
 
-    const QString standardError = QString::fromUtf8(process.readAllStandardError()).trimmed();
+    const QString standardError = QString::fromLocal8Bit(process.readAllStandardError()).trimmed();
     if (process.exitStatus() != QProcess::NormalExit || process.exitCode() != 0) {
         if (!standardError.isEmpty()) {
-            qDebug() << "   ❌ Ошибка PowerShell:" << standardError;
+            const QStringList lines = standardError.split(QRegularExpression(QStringLiteral("[\r\n]+")),
+                                                          Qt::SkipEmptyParts);
+            qDebug() << "   [WARN] PowerShell завершился с ошибкой:" << lines.value(0, standardError);
+        } else {
+            qDebug() << "   [WARN] PowerShell завершился с ошибкой, код:" << process.exitCode();
         }
         return false;
     }
@@ -522,6 +543,7 @@ QList<VpnClient::WindowsDnsBackup> VpnClient::queryActiveDnsBackups(const QStrin
                                "  if ($adapter -and $adapter.Status -eq 'Up') { "
                                "    [pscustomobject]@{ "
                                "      InterfaceAlias = $_.InterfaceAlias; "
+                               "      InterfaceIndex = $_.InterfaceIndex; "
                                "      AddressFamily = $_.AddressFamily; "
                                "      ServerAddresses = $_.ServerAddresses "
                                "    } "
@@ -542,6 +564,7 @@ QList<VpnClient::WindowsDnsBackup> VpnClient::queryActiveDnsBackups(const QStrin
     auto appendBackup = [&backups](const QJsonObject &object) {
         WindowsDnsBackup backup;
         backup.interfaceAlias = object.value(QStringLiteral("InterfaceAlias")).toString();
+        backup.interfaceIndex = object.value(QStringLiteral("InterfaceIndex")).toInt();
         backup.addressFamily = object.value(QStringLiteral("AddressFamily")).toInt();
 
         const QJsonValue serverAddressesValue = object.value(QStringLiteral("ServerAddresses"));
@@ -561,7 +584,7 @@ QList<VpnClient::WindowsDnsBackup> VpnClient::queryActiveDnsBackups(const QStrin
         }
 
         backup.hadCustomServers = !backup.serverAddresses.isEmpty();
-        if (!backup.interfaceAlias.isEmpty() && backup.addressFamily != 0) {
+        if (backup.interfaceIndex > 0 && backup.addressFamily != 0) {
             backups << backup;
         }
     };

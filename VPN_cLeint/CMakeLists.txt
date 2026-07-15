@@ -1,6 +1,17 @@
 cmake_minimum_required(VERSION 3.19)
 project(VPN_client LANGUAGES CXX)  # Исправлено имя проекта
 
+if(WIN32 AND MINGW AND NOT DEFINED OPENSSL_ROOT_DIR)
+    set(_msys2_mingw_prefix "C:/msys64/mingw64")
+
+    if(EXISTS "${_msys2_mingw_prefix}/include/openssl/evp.h"
+       AND EXISTS "${_msys2_mingw_prefix}/lib/libcrypto.dll.a")
+        set(OPENSSL_ROOT_DIR "${_msys2_mingw_prefix}" CACHE PATH "OpenSSL root directory")
+        set(OPENSSL_INCLUDE_DIR "${_msys2_mingw_prefix}/include" CACHE PATH "OpenSSL include directory")
+        set(OPENSSL_CRYPTO_LIBRARY "${_msys2_mingw_prefix}/lib/libcrypto.dll.a" CACHE FILEPATH "OpenSSL crypto library")
+    endif()
+endif()
+
 find_package(Qt6 6.4 REQUIRED COMPONENTS Core Network)
 find_package(OpenSSL REQUIRED)
 
